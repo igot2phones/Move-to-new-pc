@@ -9,6 +9,9 @@
     <OutputType>Exe</OutputType>
     <RootNamespace>MoveToNewPC.Tests</RootNamespace>
     <AssemblyName>MoveToNewPC.Tests</AssemblyName>
+    <!-- PureMain.cs is a second entry point, for the non-Windows build. The MSBuild build
+         is always the full Windows harness, so pick that Main explicitly. -->
+    <StartupObject>MoveToNewPC.Tests.Program</StartupObject>
     <TargetFrameworkVersion>v4.0</TargetFrameworkVersion>
     <LangVersion>4</LangVersion>
     <FileAlignment>512</FileAlignment>

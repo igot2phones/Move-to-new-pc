@@ -1,0 +1,4 @@
+C:\Users\Thanasis Grivas\Desktop\move to new pc\Move-to-new-pc-main\build\MoveToNewPC.Tests.exe
+C:\Users\Thanasis Grivas\Desktop\move to new pc\Move-to-new-pc-main\build\MoveToNewPC.Tests.pdb
+C:\Users\Thanasis Grivas\Desktop\move to new pc\Move-to-new-pc-main\tests\MoveToNewPC.Tests\obj\Release\MoveToNewPC.Tests.exe
+C:\Users\Thanasis Grivas\Desktop\move to new pc\Move-to-new-pc-main\tests\MoveToNewPC.Tests\obj\Release\MoveToNewPC.Tests.pdb

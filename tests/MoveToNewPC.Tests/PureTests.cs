@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using MoveToNewPC.Core.IO;
 using MoveToNewPC.Core.Manifests;
 using MoveToNewPC.Core.Util;
@@ -117,7 +118,10 @@ namespace MoveToNewPC.Tests
             {
                 Assert.Equal("0 bytes", Format.Bytes(0), "zero");
                 Assert.Equal("1023 bytes", Format.Bytes(1023), "just under 1 KB");
-                Assert.True(Format.Bytes(1024).StartsWith("1.00 KB"), "one KB");
+                // Format.Bytes is display-only and deliberately uses CurrentCulture, so the
+                // decimal separator is a comma on el-GR, de-DE and most of Europe.
+                string point = CultureInfo.CurrentCulture.NumberFormat.NumberDecimalSeparator;
+                Assert.True(Format.Bytes(1024).StartsWith("1" + point + "00 KB"), "one KB");
                 Assert.True(Format.Bytes(5L * 1024 * 1024 * 1024).IndexOf("GB") > 0, "gigabytes");
                 Assert.Equal("?", Format.Bytes(-1), "negative");
             });
@@ -203,6 +207,23 @@ namespace MoveToNewPC.Tests
                 Assert.Equal(@"C:\Users\bob", LongPath.ToDisplay(@"\\?\C:\Users\bob"), "strip local");
                 Assert.Equal(@"\\server\share", LongPath.ToDisplay(@"\\?\UNC\server\share"), "strip UNC");
                 Assert.Equal(@"C:\plain", LongPath.ToDisplay(@"C:\plain"), "already plain");
+            });
+
+            runner.Test("dot and dot-dot segments are collapsed before the prefix", delegate
+            {
+                // \\?\ disables Win32 normalisation, so a ".." that survives this far comes
+                // back as ERROR_INVALID_NAME (123) from every API we call.
+                Assert.Equal(@"\\?\C:\repo\verify", LongPath.ToExtended(@"C:\repo\tools\..\verify"), "dot-dot");
+                Assert.Equal(@"\\?\C:\repo\verify", LongPath.ToExtended(@"C:\repo\.\verify"), "single dot");
+                Assert.Equal(@"\\?\C:\b", LongPath.ToExtended(@"C:\a\..\..\..\b"), "clamped at the root");
+                Assert.Equal(@"\\?\C:\", LongPath.ToExtended(@"C:\.."), "nothing left above the root");
+                Assert.Equal(@"\\?\UNC\server\share\f", LongPath.ToExtended(@"\\server\share\x\..\f"), "UNC");
+                Assert.Equal(@"\\?\UNC\server\share", LongPath.ToExtended(@"\\server\share\..\.."), "never past the share");
+
+                // Trailing dots and spaces are a different thing entirely and must survive.
+                Assert.Equal(@"\\?\C:\a\odd.", LongPath.ToExtended(@"C:\a\odd."), "trailing dot kept");
+                Assert.Equal(@"\\?\C:\a\odd ", LongPath.ToExtended(@"C:\a\odd "), "trailing space kept");
+                Assert.Equal(@"\\?\C:\a\..b", LongPath.ToExtended(@"C:\a\..b"), "leading dots are a real name");
             });
 
             runner.Test("Combine does not double or drop separators", delegate

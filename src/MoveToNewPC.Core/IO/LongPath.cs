@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
 using MoveToNewPC.Core.Native;
@@ -10,9 +11,10 @@ namespace MoveToNewPC.Core.IO
     /// this codebase goes through <see cref="ToExtended"/> first.
     ///
     /// Note that the \\?\ prefix turns OFF Win32 path normalisation: "..", ".", trailing
-    /// dots and trailing spaces are all passed through literally. That is exactly what we
-    /// want when copying files a previous tool created badly, but it means callers must
-    /// hand us paths that are already canonical.
+    /// dots and trailing spaces are all passed through literally. Trailing dots and spaces
+    /// are kept on purpose, so we can open files a previous tool created badly. "." and
+    /// ".." are not: <see cref="ToExtended"/> collapses them itself, because a path that
+    /// still contains them is rejected by Win32 with ERROR_INVALID_NAME.
     /// </summary>
     public static class LongPath
     {
@@ -67,6 +69,12 @@ namespace MoveToNewPC.Core.IO
             if (!IsRooted(path))
             {
                 full = GetFullPathNative(path);
+            }
+            else
+            {
+                // GetFullPathNameW already did this for the relative case. A rooted path
+                // never went through any normaliser, so it can still carry ".." segments.
+                full = CollapseRelativeSegments(path);
             }
 
             if (full.Length >= 2 && full[0] == '\\' && full[1] == '\\')
@@ -133,6 +141,124 @@ namespace MoveToNewPC.Core.IO
                 return left + "\\" + right;
             }
             return left + right;
+        }
+
+        private static readonly char[] SeparatorChars = new char[] { '\\', '/' };
+
+        /// <summary>
+        /// Collapses "." and ".." segments, leaving everything else byte-for-byte alone.
+        /// The \\?\ prefix turns Win32 normalisation off, so a rooted path containing ".."
+        /// reaches the API literally and comes back as ERROR_INVALID_NAME (123). Trailing
+        /// dots and spaces are deliberately NOT touched here - the walker has to be able to
+        /// open names a previous tool created badly, which is why GetFullPathNameW (which
+        /// would strip them) is not used for rooted paths.
+        /// ".." never climbs above the root: at the root it is simply dropped.
+        /// </summary>
+        public static string CollapseRelativeSegments(string path)
+        {
+            if (string.IsNullOrEmpty(path) || !HasNavigationSegment(path))
+            {
+                return path;
+            }
+
+            int rootLength = GetRootLength(path);
+            string root = path.Substring(0, rootLength);
+            string[] parts = path.Substring(rootLength).Split(SeparatorChars);
+
+            List<string> kept = new List<string>(parts.Length);
+            for (int i = 0; i < parts.Length; i++)
+            {
+                string part = parts[i];
+                if (part.Length == 0 || string.Equals(part, ".", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+                if (string.Equals(part, "..", StringComparison.Ordinal))
+                {
+                    if (kept.Count > 0)
+                    {
+                        kept.RemoveAt(kept.Count - 1);
+                    }
+                    continue;
+                }
+                kept.Add(part);
+            }
+
+            StringBuilder sb = new StringBuilder(path.Length);
+            sb.Append(root);
+            for (int i = 0; i < kept.Count; i++)
+            {
+                if (i > 0 || (rootLength > 0 && !IsSeparator(path[rootLength - 1])))
+                {
+                    sb.Append('\\');
+                }
+                sb.Append(kept[i]);
+            }
+            return sb.ToString();
+        }
+
+        private static bool IsSeparator(char c)
+        {
+            return c == '\\' || c == '/';
+        }
+
+        private static bool HasNavigationSegment(string path)
+        {
+            int i = 0;
+            while (i < path.Length)
+            {
+                int end = path.IndexOfAny(SeparatorChars, i);
+                if (end < 0)
+                {
+                    end = path.Length;
+                }
+                int length = end - i;
+                if (length == 1 && path[i] == '.')
+                {
+                    return true;
+                }
+                if (length == 2 && path[i] == '.' && path[i + 1] == '.')
+                {
+                    return true;
+                }
+                i = end + 1;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Length of the part of the path that ".." must never climb above. For UNC this is
+        /// the whole \\server\share, not just the leading slashes.
+        /// </summary>
+        private static int GetRootLength(string path)
+        {
+            if (path.Length >= 2 && IsSeparator(path[0]) && IsSeparator(path[1]))
+            {
+                int i = 2;
+                int separators = 0;
+                while (i < path.Length)
+                {
+                    if (IsSeparator(path[i]))
+                    {
+                        separators++;
+                        if (separators == 2)
+                        {
+                            break;
+                        }
+                    }
+                    i++;
+                }
+                return i;
+            }
+            if (path.Length >= 2 && path[1] == ':')
+            {
+                return path.Length >= 3 && IsSeparator(path[2]) ? 3 : 2;
+            }
+            if (IsSeparator(path[0]))
+            {
+                return 1;
+            }
+            return 0;
         }
 
         public static string GetFileName(string path)

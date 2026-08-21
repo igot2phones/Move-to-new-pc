@@ -1,0 +1,5 @@
+C:\Users\Thanasis Grivas\Desktop\move to new pc\Move-to-new-pc-main\build\MoveToNewPC.exe
+C:\Users\Thanasis Grivas\Desktop\move to new pc\Move-to-new-pc-main\src\MoveToNewPC.App\obj\Release\MoveToNewPC.App.csprojResolveAssemblyReference.cache
+C:\Users\Thanasis Grivas\Desktop\move to new pc\Move-to-new-pc-main\src\MoveToNewPC.App\obj\Release\MoveToNewPC.exe
+C:\Users\Thanasis Grivas\Desktop\move to new pc\Move-to-new-pc-main\src\MoveToNewPC.App\obj\Release\MoveToNewPC.pdb
+C:\Users\Thanasis Grivas\Desktop\move to new pc\Move-to-new-pc-main\build\MoveToNewPC.pdb

@@ -1,0 +1,4 @@
+C:\Users\Thanasis Grivas\Desktop\move to new pc\Move-to-new-pc-main\build\obj\Core\Release\MoveToNewPC.Core.dll
+C:\Users\Thanasis Grivas\Desktop\move to new pc\Move-to-new-pc-main\build\obj\Core\Release\MoveToNewPC.Core.pdb
+C:\Users\Thanasis Grivas\Desktop\move to new pc\Move-to-new-pc-main\src\MoveToNewPC.Core\obj\Release\MoveToNewPC.Core.dll
+C:\Users\Thanasis Grivas\Desktop\move to new pc\Move-to-new-pc-main\src\MoveToNewPC.Core\obj\Release\MoveToNewPC.Core.pdb

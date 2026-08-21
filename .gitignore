@@ -7,6 +7,11 @@ bin/
 *.suo
 *.pdb
 
+# Output of tools\windows-verify.cmd. Never commit this: it records the machine name and
+# the operator's profile path, and the nasty tree it builds contains junctions and a
+# multi-gigabyte sparse file that git would expand to its full logical size.
+verify-results/
+
 # Logs, reports and manifests produced by running the app next to the EXE.
 MoveToNewPC.log*
 MoveToNewPC-report-*.txt
