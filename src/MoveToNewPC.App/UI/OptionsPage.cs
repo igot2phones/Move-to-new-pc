@@ -155,7 +155,11 @@ namespace MoveToNewPC.UI
                 }
             }
 
-            return new DestinationPage();
+            if (Session.Transport == TransportKind.Lan || Session.Transport == TransportKind.DirectCable)
+            {
+                return new LanSendPage();
+            }
+            return new PackageDestinationPage();
         }
     }
 }

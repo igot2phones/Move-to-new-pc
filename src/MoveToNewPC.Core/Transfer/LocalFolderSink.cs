@@ -10,6 +10,7 @@ using MoveToNewPC.Core.IO;
 using MoveToNewPC.Core.Manifests;
 using MoveToNewPC.Core.Model;
 using MoveToNewPC.Core.Native;
+using MoveToNewPC.Core.Selection;
 using MoveToNewPC.Core.Util;
 
 namespace MoveToNewPC.Core.Transfer
@@ -43,6 +44,9 @@ namespace MoveToNewPC.Core.Transfer
         private readonly CopyOptions _options;
         private readonly CompletionJournal _journal;
         private readonly Dictionary<int, string> _userRoots = new Dictionary<int, string>();
+        /// <summary>Absolute base folder for each (user, root) pair, keyed "userIndex/rootIndex".</summary>
+        private readonly Dictionary<string, string> _rootBases = new Dictionary<string, string>();
+        private readonly DestinationLayout _layout;
         private readonly List<PendingDirectoryTimes> _directoryTimes = new List<PendingDirectoryTimes>();
 
         // Directory timestamps are applied at the end, deepest first: writing files into a
@@ -59,6 +63,12 @@ namespace MoveToNewPC.Core.Transfer
         private bool _disposed;
 
         public LocalFolderSink(string destinationRoot, CopyOptions options, CompletionJournal journal)
+            : this(destinationRoot, options, journal, DestinationLayout.SingleFolder)
+        {
+        }
+
+        public LocalFolderSink(string destinationRoot, CopyOptions options, CompletionJournal journal,
+                               DestinationLayout layout)
         {
             if (string.IsNullOrEmpty(destinationRoot))
             {
@@ -68,6 +78,7 @@ namespace MoveToNewPC.Core.Transfer
             _destinationRoot = LongPath.TrimTrailingSeparators(destinationRoot);
             _options = options ?? CopyOptions.Defaults();
             _journal = journal;
+            _layout = layout;
         }
 
         public string DestinationRoot
@@ -86,6 +97,16 @@ namespace MoveToNewPC.Core.Transfer
             }
 
             _userRoots.Clear();
+            _rootBases.Clear();
+
+            // In MatchingFolders mode anything that is not one of this PC's own known
+            // folders lands here, so a migration never scatters unrecognised folders across
+            // the Desktop itself.
+            string strayRoot = null;
+            if (_layout == DestinationLayout.MatchingFolders)
+            {
+                strayRoot = BuildStrayRoot(manifest);
+            }
 
             for (int u = 0; u < manifest.Users.Count; u++)
             {
@@ -95,7 +116,23 @@ namespace MoveToNewPC.Core.Transfer
                     string.IsNullOrEmpty(user.DestinationHint) ? user.AccountName : user.DestinationHint,
                     "User " + user.UserIndex.ToString(CultureInfo.InvariantCulture));
 
-                string userRoot = LongPath.Combine(_destinationRoot, folderName);
+                // Only the first account can be mapped onto this PC's own folders: merging
+                // two people's Documents into one place would be a data-loss bug, not a
+                // convenience. Everyone else goes to the stray root under their own name.
+                bool mapOntoThisPc = _layout == DestinationLayout.MatchingFolders && u == 0;
+
+                string userRoot;
+                if (_layout == DestinationLayout.MatchingFolders)
+                {
+                    userRoot = mapOntoThisPc
+                        ? strayRoot
+                        : LongPath.Combine(strayRoot, folderName);
+                }
+                else
+                {
+                    userRoot = LongPath.Combine(_destinationRoot, folderName);
+                }
+
                 _userRoots[user.UserIndex] = userRoot;
 
                 if (!NativeFile.CreateDirectoryRecursive(userRoot, out error))
@@ -108,15 +145,29 @@ namespace MoveToNewPC.Core.Transfer
                 // new PC rather than silently vanishing.
                 for (int r = 0; r < user.Roots.Count; r++)
                 {
-                    string reason;
-                    string rootPath = PathValidation.ResolveUnderRoot(userRoot,
-                                                                      user.Roots[r].DestinationRelativeRoot,
-                                                                      out reason);
+                    ManifestRoot manifestRoot = user.Roots[r];
+                    string rootPath = null;
+
+                    if (mapOntoThisPc)
+                    {
+                        rootPath = ResolveOntoThisPc(manifestRoot);
+                    }
+
                     if (rootPath == null)
                     {
-                        throw new IOException("Refusing destination folder \""
-                                              + user.Roots[r].DestinationRelativeRoot + "\": " + reason);
+                        string reason;
+                        rootPath = PathValidation.ResolveUnderRoot(userRoot,
+                                                                   manifestRoot.DestinationRelativeRoot,
+                                                                   out reason);
+                        if (rootPath == null)
+                        {
+                            throw new IOException("Refusing destination folder \""
+                                                  + manifestRoot.DestinationRelativeRoot + "\": " + reason);
+                        }
                     }
+
+                    _rootBases[BaseKey(user.UserIndex, manifestRoot.RootIndex)] = rootPath;
+
                     if (!NativeFile.CreateDirectoryRecursive(rootPath, out error))
                     {
                         Log.Warn("Could not pre-create " + LongPath.ToDisplay(rootPath) + ": "
@@ -125,8 +176,71 @@ namespace MoveToNewPC.Core.Transfer
                 }
             }
 
-            Log.Info("Destination: " + LongPath.ToDisplay(_destinationRoot)
-                     + " (" + manifest.Users.Count + " user folder(s))");
+            if (_layout == DestinationLayout.MatchingFolders)
+            {
+                Log.Info("Restoring into this PC's own folders; anything else goes to "
+                         + LongPath.ToDisplay(strayRoot));
+            }
+            else
+            {
+                Log.Info("Destination: " + LongPath.ToDisplay(_destinationRoot)
+                         + " (" + manifest.Users.Count + " user folder(s))");
+            }
+        }
+
+        private static string BaseKey(int userIndex, int rootIndex)
+        {
+            return userIndex.ToString(CultureInfo.InvariantCulture) + "/"
+                   + rootIndex.ToString(CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>
+        /// The folder on this PC's Desktop that receives everything which is not a known
+        /// folder. Named after the machine it came from so two migrations do not merge.
+        /// </summary>
+        private string BuildStrayRoot(TransferManifest manifest)
+        {
+            string desktop = LocalKnownFolders.Resolve(KnownFolder.Desktop);
+            if (string.IsNullOrEmpty(desktop))
+            {
+                // No Desktop is close to impossible, but falling back to the chosen folder
+                // is better than refusing the whole transfer.
+                Log.Warn("Could not find this PC's Desktop; using the chosen folder instead.");
+                return _destinationRoot;
+            }
+
+            string source = PathValidation.SanitiseSegment(manifest.SourceMachine, "old PC");
+            return LongPath.Combine(desktop, "From " + source);
+        }
+
+        /// <summary>
+        /// Returns this PC's real folder for a Tier A root whose name we recognise, or null
+        /// when the caller should fall back to the stray root. Only the short list in
+        /// LocalKnownFolders is mapped: those are the folders whose meaning is the same on
+        /// every Windows PC.
+        /// </summary>
+        private string ResolveOntoThisPc(ManifestRoot root)
+        {
+            if (root.Tier != SelectionTier.KnownFolder)
+            {
+                return null;
+            }
+
+            KnownFolder folder;
+            if (!LocalKnownFolders.TryParseDestinationName(root.DestinationRelativeRoot, out folder))
+            {
+                return null;
+            }
+
+            string path = LocalKnownFolders.Resolve(folder);
+            if (string.IsNullOrEmpty(path))
+            {
+                Log.Warn("Could not resolve this PC's " + folder + "; it will go to the Desktop folder instead.");
+                return null;
+            }
+
+            Log.Info(root.DestinationRelativeRoot + " -> " + LongPath.ToDisplay(path));
+            return path;
         }
 
         public void EnsureDirectory(ManifestUser user, ManifestRoot root, ManifestDirectory directory)
@@ -461,22 +575,26 @@ namespace MoveToNewPC.Core.Transfer
 
         private string Resolve(ManifestUser user, ManifestRoot root, string relativePath)
         {
-            string userRoot;
-            if (!_userRoots.TryGetValue(user.UserIndex, out userRoot))
+            // The base for this root was decided once in BeginSession - it may be a folder
+            // under the chosen destination, or one of this PC's own known folders. Either
+            // way, containment is re-checked here against that base.
+            string rootBase;
+            if (!_rootBases.TryGetValue(BaseKey(user.UserIndex, root.RootIndex), out rootBase))
             {
-                Log.Warn("No destination root for user index " + user.UserIndex);
+                Log.Warn("No destination base for user " + user.UserIndex + " root " + root.RootIndex);
                 return null;
             }
 
-            string combined = string.IsNullOrEmpty(relativePath)
-                              ? root.DestinationRelativeRoot
-                              : LongPath.Combine(root.DestinationRelativeRoot, relativePath);
+            if (string.IsNullOrEmpty(relativePath))
+            {
+                return rootBase;
+            }
 
             string reason;
-            string full = PathValidation.ResolveUnderRoot(userRoot, combined, out reason);
+            string full = PathValidation.ResolveUnderRoot(rootBase, relativePath, out reason);
             if (full == null)
             {
-                Log.Warn("Rejected path \"" + combined + "\": " + reason);
+                Log.Warn("Rejected path \"" + relativePath + "\": " + reason);
             }
             return full;
         }

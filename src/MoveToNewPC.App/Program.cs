@@ -13,7 +13,7 @@ namespace MoveToNewPC
     internal static class Program
     {
         internal const string ProductName = "Move to New PC";
-        internal const string Version = "0.3.0 (M0-M2)";
+        internal const string Version = "0.6.0 (M0-M3, M6)";
 
         [STAThread]
         private static void Main(string[] args)

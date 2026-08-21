@@ -8,6 +8,8 @@ using MoveToNewPC.Core.IO;
 using MoveToNewPC.Core.Manifests;
 using MoveToNewPC.Core.Model;
 using MoveToNewPC.Core.Native;
+using MoveToNewPC.Core.Net;
+using MoveToNewPC.Core.Package;
 using MoveToNewPC.Core.Profiles;
 using MoveToNewPC.Core.Selection;
 using MoveToNewPC.Core.Transfer;
@@ -28,6 +30,9 @@ namespace MoveToNewPC.Tests
             RegisterManifestIo(runner);
             RegisterJournal(runner);
             RegisterEngine(runner);
+            RegisterPackage(runner);
+            RegisterNetwork(runner);
+            RegisterRestoreLayout(runner);
             RegisterProfiles(runner);
         }
 
@@ -1002,6 +1007,784 @@ namespace MoveToNewPC.Tests
         }
 
         // ---- profiles -----------------------------------------------------------
+
+        // ---- encrypted package (M6) ---------------------------------------------
+
+        /// <summary>
+        /// Packs a source tree into an encrypted package and restores it somewhere else,
+        /// returning the restore result.
+        /// </summary>
+        private static TransferResult PackAndRestore(string source, string packagePath,
+                                                     string destination, string writePassphrase,
+                                                     string readPassphrase, out string openError)
+        {
+            CopyOptions options = CopyOptions.Defaults();
+            string manifestPath = LongPath.ToDisplay(LongPath.Combine(
+                LongPath.GetDirectoryName(packagePath), "pack.mtnpc-manifest"));
+
+            TransferSelection selection = BuildSelection(source, "Data");
+            ScanEngine scanner = new ScanEngine(selection, options);
+            TransferManifest manifest = scanner.Scan(manifestPath, new SilentScanObserver(), CancellationToken.None);
+
+            using (PackageSink sink = new PackageSink(packagePath, writePassphrase))
+            using (PauseGate gate = new PauseGate())
+            {
+                TransferEngine engine = new TransferEngine(options, sink, new SilentTransferObserver());
+                engine.Run(manifest, manifestPath, CancellationToken.None, gate);
+            }
+
+            int error;
+            NativeFile.CreateDirectoryRecursive(destination, out error);
+
+            using (PackageReader reader = PackageReader.Open(packagePath, readPassphrase, out openError))
+            {
+                if (reader == null)
+                {
+                    return null;
+                }
+
+                using (CompletionJournal journal = CompletionJournal.OpenOrCreate(
+                           LongPath.ToDisplay(LongPath.Combine(destination, "restore" + CompletionJournal.FileExtension)),
+                           reader.Manifest.ManifestId))
+                using (LocalFolderSink target = new LocalFolderSink(destination, options, journal))
+                using (PauseGate gate = new PauseGate())
+                {
+                    return reader.Restore(target, new SilentTransferObserver(), CancellationToken.None, gate);
+                }
+            }
+        }
+
+        private static void RegisterPackage(TestRunner runner)
+        {
+            runner.Group("Encrypted package");
+
+            runner.Test("round-trips content, names and sizes through the package", delegate
+            {
+                string scratch = TestFs.CreateScratch();
+                try
+                {
+                    string source = LongPath.Combine(scratch, "src");
+                    string destination = LongPath.Combine(scratch, "dst");
+                    string package = LongPath.ToDisplay(LongPath.Combine(scratch, "carry" + PackageSink.FileExtension));
+
+                    TestFs.WriteFile(LongPath.Combine(source, "notes.txt"), "hello package");
+                    TestFs.WriteFile(LongPath.Combine(source, "sub\\deeper\\data.bin"), new byte[] { 1, 2, 3, 4, 5 });
+                    TestFs.WriteFile(LongPath.Combine(source, "unicode-åäö-ΑΒ.txt"), "greek and nordic");
+                    TestFs.WriteFile(LongPath.Combine(source, "empty.txt"), string.Empty);
+
+                    string openError;
+                    TransferResult result = PackAndRestore(source, package, destination,
+                                                           "correct horse battery", "correct horse battery",
+                                                           out openError);
+
+                    Assert.NotNull(result, "the package opened");
+                    Assert.Equal(4, result.FilesCopied, "all four files restored");
+                    Assert.Equal(0, result.FilesFailed, "nothing failed");
+
+                    // The sink maps into <destination>\<account>\<root label>\...
+                    string restoredRoot = LongPath.Combine(LongPath.Combine(destination, "testuser"), "Data");
+                    Assert.Equal("hello package",
+                                 TestFs.ReadAllText(LongPath.Combine(restoredRoot, "notes.txt")), "content survives");
+                    Assert.Equal("greek and nordic",
+                                 TestFs.ReadAllText(LongPath.Combine(restoredRoot, "unicode-åäö-ΑΒ.txt")),
+                                 "unicode names survive");
+                    Assert.Equal(5,
+                                 TestFs.ReadAllBytes(LongPath.Combine(restoredRoot, "sub\\deeper\\data.bin")).Length,
+                                 "nested binary survives");
+                    Assert.Equal(0,
+                                 TestFs.ReadAllBytes(LongPath.Combine(restoredRoot, "empty.txt")).Length,
+                                 "zero-byte file survives");
+                }
+                finally
+                {
+                    TestFs.DeleteTree(scratch);
+                }
+            });
+
+            runner.Test("a file larger than one frame survives intact", delegate
+            {
+                string scratch = TestFs.CreateScratch();
+                try
+                {
+                    string source = LongPath.Combine(scratch, "src");
+                    string destination = LongPath.Combine(scratch, "dst");
+                    string package = LongPath.ToDisplay(LongPath.Combine(scratch, "big" + PackageSink.FileExtension));
+
+                    // Deliberately spans several 64 KB frames and is not a multiple of the
+                    // block size, so padding and frame boundaries both get exercised.
+                    byte[] payload = new byte[300000];
+                    for (int i = 0; i < payload.Length; i++)
+                    {
+                        payload[i] = (byte)(i * 31);
+                    }
+                    TestFs.WriteFile(LongPath.Combine(source, "large.bin"), payload);
+
+                    string openError;
+                    TransferResult result = PackAndRestore(source, package, destination,
+                                                           "pw", "pw", out openError);
+
+                    Assert.NotNull(result, "the package opened");
+                    Assert.Equal(1, result.FilesCopied, "the large file restored");
+
+                    byte[] restored = TestFs.ReadAllBytes(LongPath.Combine(
+                        LongPath.Combine(LongPath.Combine(destination, "testuser"), "Data"), "large.bin"));
+                    Assert.Equal(payload.Length, restored.Length, "length matches");
+
+                    bool identical = true;
+                    for (int i = 0; i < payload.Length; i++)
+                    {
+                        if (payload[i] != restored[i]) { identical = false; break; }
+                    }
+                    Assert.True(identical, "every byte matches");
+                }
+                finally
+                {
+                    TestFs.DeleteTree(scratch);
+                }
+            });
+
+            runner.Test("the wrong password is refused and nothing is written", delegate
+            {
+                string scratch = TestFs.CreateScratch();
+                try
+                {
+                    string source = LongPath.Combine(scratch, "src");
+                    string destination = LongPath.Combine(scratch, "dst");
+                    string package = LongPath.ToDisplay(LongPath.Combine(scratch, "secret" + PackageSink.FileExtension));
+
+                    TestFs.WriteFile(LongPath.Combine(source, "private.txt"), "confidential");
+
+                    string openError;
+                    TransferResult result = PackAndRestore(source, package, destination,
+                                                           "the-right-one", "the-WRONG-one", out openError);
+
+                    Assert.Null(result, "the restore did not run");
+                    Assert.NotNull(openError, "a reason was given");
+                    Assert.True(openError.IndexOf("password", StringComparison.OrdinalIgnoreCase) >= 0,
+                                "the reason mentions the password: " + openError);
+
+                    // Nothing from the package may reach the disk on a bad passphrase.
+                    Assert.False(NativeFile.Exists(LongPath.Combine(LongPath.Combine(
+                                     LongPath.Combine(destination, "testuser"), "Data"), "private.txt")),
+                                 "no file was written");
+                }
+                finally
+                {
+                    TestFs.DeleteTree(scratch);
+                }
+            });
+
+            runner.Test("a tampered package is rejected, not partially restored", delegate
+            {
+                string scratch = TestFs.CreateScratch();
+                try
+                {
+                    string source = LongPath.Combine(scratch, "src");
+                    string destination = LongPath.Combine(scratch, "dst");
+                    string package = LongPath.ToDisplay(LongPath.Combine(scratch, "tamper" + PackageSink.FileExtension));
+
+                    TestFs.WriteFile(LongPath.Combine(source, "a.txt"), new string('a', 5000));
+
+                    CopyOptions options = CopyOptions.Defaults();
+                    string manifestPath = LongPath.ToDisplay(LongPath.Combine(scratch, "t.mtnpc-manifest"));
+                    TransferSelection selection = BuildSelection(source, "Data");
+                    ScanEngine scanner = new ScanEngine(selection, options);
+                    TransferManifest manifest = scanner.Scan(manifestPath, new SilentScanObserver(), CancellationToken.None);
+
+                    using (PackageSink sink = new PackageSink(package, "pw"))
+                    using (PauseGate gate = new PauseGate())
+                    {
+                        TransferEngine engine = new TransferEngine(options, sink, new SilentTransferObserver());
+                        engine.Run(manifest, manifestPath, CancellationToken.None, gate);
+                    }
+
+                    // Flip a byte deep inside the ciphertext, past the header and first frame
+                    // header, so it lands in encrypted payload rather than metadata.
+                    byte[] raw = File.ReadAllBytes(package);
+                    int target = raw.Length - 200;
+                    raw[target] = (byte)(raw[target] ^ 0xFF);
+                    File.WriteAllBytes(package, raw);
+
+                    int error;
+                    NativeFile.CreateDirectoryRecursive(destination, out error);
+
+                    string openError;
+                    bool rejected = false;
+                    using (PackageReader reader = PackageReader.Open(package, "pw", out openError))
+                    {
+                        if (reader == null)
+                        {
+                            rejected = true;
+                        }
+                        else
+                        {
+                            using (LocalFolderSink target2 = new LocalFolderSink(destination, options, null))
+                            using (PauseGate gate = new PauseGate())
+                            {
+                                TransferResult r = reader.Restore(target2, new SilentTransferObserver(),
+                                                                  CancellationToken.None, gate);
+                                // The MAC must fail; the restore reports it rather than
+                                // pretending the transfer was clean.
+                                rejected = r.FailureMessage != null || r.FilesFailed > 0;
+                            }
+                        }
+                    }
+
+                    Assert.True(rejected, "tampering was detected and reported");
+                }
+                finally
+                {
+                    TestFs.DeleteTree(scratch);
+                }
+            });
+
+            runner.Test("an interrupted package leaves no usable file behind", delegate
+            {
+                string scratch = TestFs.CreateScratch();
+                try
+                {
+                    string package = LongPath.ToDisplay(LongPath.Combine(scratch, "aborted" + PackageSink.FileExtension));
+
+                    // Dispose without EndSession: the same shape as a crash mid-write.
+                    using (PackageSink sink = new PackageSink(package, "pw"))
+                    {
+                        TransferManifest manifest = new TransferManifest();
+                        manifest.ManifestId = "abc";
+                        manifest.CreatedUtc = DateTime.UtcNow;
+                        manifest.SourceMachine = "test";
+                        manifest.ToolVersion = "test";
+                        sink.BeginSession(manifest);
+                    }
+
+                    Assert.False(File.Exists(package), "no finished package was left");
+                    Assert.False(File.Exists(package + ".mtnpc-part"), "no part file was left either");
+                }
+                finally
+                {
+                    TestFs.DeleteTree(scratch);
+                }
+            });
+        }
+
+        // ---- LAN transport (M3) --------------------------------------------------
+
+        /// <summary>Holds what the receiver thread produced, so the test thread can assert on it.</summary>
+        private sealed class ReceiverOutcome
+        {
+            public TransferResult Result;
+            public Exception Failure;
+            public string PeerMachine;
+        }
+
+        /// <summary>
+        /// Runs a real paired transfer over loopback. Returns the receiver's result, or
+        /// leaves Failure set if the receiver threw.
+        /// </summary>
+        private static ReceiverOutcome RunLanTransfer(string source, string destination, int port,
+                                                      string senderCode, out TransferResult sendResult,
+                                                      out Exception sendFailure)
+        {
+            ReceiverOutcome outcome = new ReceiverOutcome();
+            CopyOptions options = CopyOptions.Defaults();
+
+            NetworkReceiver receiver = new NetworkReceiver(port);
+            receiver.Start(false);          // no beacon: loopback needs no discovery
+            string realCode = receiver.PairingCode;
+
+            CancellationTokenSource receiverCancel = new CancellationTokenSource();
+            string destinationCopy = destination;
+
+            Thread receiverThread = new Thread(delegate()
+            {
+                try
+                {
+                    using (PauseGate gate = new PauseGate())
+                    using (SecureChannel channel = receiver.AcceptOnePeer(receiverCancel.Token))
+                    {
+                        if (channel != null)
+                        {
+                            using (LocalFolderSink sink = new LocalFolderSink(destinationCopy, options, null))
+                            {
+                                outcome.Result = receiver.ReceiveInto(
+                                    channel, sink, new SilentTransferObserver(),
+                                    delegate(TransferManifestInfo info)
+                                    {
+                                        outcome.PeerMachine = info.PeerMachineName;
+                                    },
+                                    receiverCancel.Token, gate);
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    outcome.Failure = ex;
+                }
+            });
+            receiverThread.IsBackground = true;
+            receiverThread.Start();
+
+            // Give the listener a moment to reach Pending().
+            Thread.Sleep(300);
+
+            sendResult = null;
+            sendFailure = null;
+            try
+            {
+                string code = senderCode ?? realCode;
+                using (SecureChannel channel = SecureChannel.Connect("127.0.0.1", port, "test-sender", code))
+                {
+                    string manifestPath = LongPath.ToDisplay(LongPath.Combine(
+                        LongPath.GetDirectoryName(destination), "lan.mtnpc-manifest"));
+
+                    TransferSelection selection = BuildSelection(source, "Data");
+                    ScanEngine scanner = new ScanEngine(selection, options);
+                    TransferManifest manifest = scanner.Scan(manifestPath, new SilentScanObserver(),
+                                                             CancellationToken.None);
+
+                    using (NetworkSink sink = new NetworkSink(channel, false))
+                    using (PauseGate gate = new PauseGate())
+                    {
+                        TransferEngine engine = new TransferEngine(options, sink, new SilentTransferObserver());
+                        sendResult = engine.Run(manifest, manifestPath, CancellationToken.None, gate);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                sendFailure = ex;
+            }
+
+            if (!receiverThread.Join(30000))
+            {
+                receiverCancel.Cancel();
+                receiverThread.Join(5000);
+            }
+            receiver.Dispose();
+            receiverCancel.Dispose();
+            return outcome;
+        }
+
+        private static void RegisterNetwork(TestRunner runner)
+        {
+            runner.Group("LAN transfer");
+
+            runner.Test("a paired transfer moves files over a socket", delegate
+            {
+                string scratch = TestFs.CreateScratch();
+                try
+                {
+                    string source = LongPath.Combine(scratch, "src");
+                    string destination = LongPath.Combine(scratch, "dst");
+
+                    TestFs.WriteFile(LongPath.Combine(source, "notes.txt"), "sent over the wire");
+                    TestFs.WriteFile(LongPath.Combine(source, "sub\\nested.bin"), new byte[] { 9, 8, 7, 6 });
+                    TestFs.WriteFile(LongPath.Combine(source, "unicode-ΑΒΓ-日本.txt"), "unicode on the wire");
+
+                    // Deliberately spans several frames.
+                    byte[] payload = new byte[200000];
+                    for (int i = 0; i < payload.Length; i++) { payload[i] = (byte)(i * 17); }
+                    TestFs.WriteFile(LongPath.Combine(source, "large.bin"), payload);
+
+                    TransferResult sendResult;
+                    Exception sendFailure;
+                    ReceiverOutcome outcome = RunLanTransfer(source, destination, 51799, null,
+                                                             out sendResult, out sendFailure);
+
+                    Assert.Null(sendFailure, "the sender did not throw");
+                    Assert.Null(outcome.Failure, "the receiver did not throw");
+                    Assert.NotNull(outcome.Result, "the receiver produced a result");
+                    Assert.Equal(4, outcome.Result.FilesCopied, "all four files arrived");
+                    Assert.Equal(0, outcome.Result.FilesFailed, "nothing failed");
+                    Assert.Equal("test-sender", outcome.PeerMachine, "the peer name came across");
+
+                    string root = LongPath.Combine(LongPath.Combine(destination, "testuser"), "Data");
+                    Assert.Equal("sent over the wire",
+                                 TestFs.ReadAllText(LongPath.Combine(root, "notes.txt")), "content survives");
+                    Assert.Equal("unicode on the wire",
+                                 TestFs.ReadAllText(LongPath.Combine(root, "unicode-ΑΒΓ-日本.txt")),
+                                 "unicode names survive");
+
+                    byte[] arrived = TestFs.ReadAllBytes(LongPath.Combine(root, "large.bin"));
+                    Assert.Equal(payload.Length, arrived.Length, "the large file is the right size");
+
+                    bool identical = true;
+                    for (int i = 0; i < payload.Length; i++)
+                    {
+                        if (payload[i] != arrived[i]) { identical = false; break; }
+                    }
+                    Assert.True(identical, "every byte of the large file matches");
+                }
+                finally
+                {
+                    TestFs.DeleteTree(scratch);
+                }
+            });
+
+            runner.Test("the wrong pairing code is refused and nothing is written", delegate
+            {
+                string scratch = TestFs.CreateScratch();
+                try
+                {
+                    string source = LongPath.Combine(scratch, "src");
+                    string destination = LongPath.Combine(scratch, "dst");
+                    TestFs.WriteFile(LongPath.Combine(source, "private.txt"), "must not arrive");
+
+                    TransferResult sendResult;
+                    Exception sendFailure;
+                    // "000000" will not match a randomly generated code except once in a
+                    // million; regenerate if it ever collides rather than asserting blindly.
+                    ReceiverOutcome outcome = RunLanTransfer(source, destination, 51800, "000000",
+                                                             out sendResult, out sendFailure);
+
+                    Assert.NotNull(sendFailure, "the sender was rejected");
+                    Assert.True(sendFailure is HandshakeException,
+                                "rejected by the handshake, not by something else: "
+                                + sendFailure.GetType().Name);
+
+                    Assert.False(NativeFile.Exists(LongPath.Combine(LongPath.Combine(
+                                     LongPath.Combine(destination, "testuser"), "Data"), "private.txt")),
+                                 "no file was written");
+                }
+                finally
+                {
+                    TestFs.DeleteTree(scratch);
+                }
+            });
+
+            runner.Test("both sides derive the same keys, and a wrong code derives different ones", delegate
+            {
+                byte[] senderPublic = new byte[] { 1, 2, 3, 4 };
+                byte[] receiverPublic = new byte[] { 5, 6, 7, 8 };
+
+                byte[] a = NetworkProtocol.ComputeTranscript(1, senderPublic, receiverPublic,
+                                                             "OLD-PC", "NEW-PC", "123456");
+                byte[] b = NetworkProtocol.ComputeTranscript(1, senderPublic, receiverPublic,
+                                                             "OLD-PC", "NEW-PC", "123456");
+                byte[] wrongCode = NetworkProtocol.ComputeTranscript(1, senderPublic, receiverPublic,
+                                                                     "OLD-PC", "NEW-PC", "123457");
+                byte[] swappedKey = NetworkProtocol.ComputeTranscript(1, receiverPublic, senderPublic,
+                                                                      "OLD-PC", "NEW-PC", "123456");
+
+                Assert.True(Format.ConstantTimeEquals(a, b), "the transcript is deterministic");
+                Assert.False(Format.ConstantTimeEquals(a, wrongCode), "one different digit changes it");
+                Assert.False(Format.ConstantTimeEquals(a, swappedKey),
+                             "substituting a public key changes it - this is what stops a man in the middle");
+            });
+
+            runner.Test("the discovery beacon carries no pairing code and no user data", delegate
+            {
+                string code = NetworkProtocol.NewPairingCode();
+                byte[] beacon = DiscoveryBeacon.BuildBeacon("MY-NEW-PC", NetworkProtocol.TransferPort);
+                string asText = Encoding.UTF8.GetString(beacon);
+
+                Assert.True(asText.IndexOf("MY-NEW-PC", StringComparison.Ordinal) >= 0,
+                            "the machine name is present, which is the point of the beacon");
+                Assert.True(asText.IndexOf(code, StringComparison.Ordinal) < 0,
+                            "the pairing code is NOT in the broadcast");
+                Assert.True(asText.IndexOf(Environment.UserName, StringComparison.OrdinalIgnoreCase) < 0,
+                            "the user name is not in the broadcast");
+                Assert.True(beacon.Length < 300, "the beacon is small enough to be a single datagram");
+            });
+
+            runner.Test("pairing codes are six digits and vary", delegate
+            {
+                bool allSix = true;
+                bool sawDifference = false;
+                string first = NetworkProtocol.NewPairingCode();
+
+                for (int i = 0; i < 50; i++)
+                {
+                    string code = NetworkProtocol.NewPairingCode();
+                    if (code.Length != 6) { allSix = false; }
+                    for (int c = 0; c < code.Length; c++)
+                    {
+                        if (code[c] < '0' || code[c] > '9') { allSix = false; }
+                    }
+                    if (code != first) { sawDifference = true; }
+                }
+
+                Assert.True(allSix, "every code is exactly six digits");
+                Assert.True(sawDifference, "codes are not constant");
+                Assert.Equal("123 456", NetworkProtocol.FormatCodeForDisplay("123456"), "display grouping");
+                Assert.Equal("123456", NetworkProtocol.NormaliseCode(" 123-456 "), "typed codes are cleaned up");
+            });
+        }
+
+        // ---- restore layout on the new PC ---------------------------------------
+
+        /// <summary>
+        /// Builds a selection with one Tier A known folder and one Tier C custom folder, so
+        /// a restore exercises both the "goes home" and the "goes to the Desktop" paths.
+        /// </summary>
+        private static TransferSelection BuildMixedSelection(string knownSource, string customSource)
+        {
+            UserProfile profile = new UserProfile();
+            profile.Sid = "S-1-5-21-0-0-0-1001";
+            profile.AccountName = "testuser";
+            profile.ProfilePath = knownSource;
+            profile.ProfileExists = true;
+
+            SelectionRoot documents = new SelectionRoot();
+            documents.Tier = SelectionTier.KnownFolder;
+            documents.Folder = KnownFolder.Documents;
+            documents.IsKnownFolder = true;
+            documents.Label = "Documents";
+            documents.SourcePath = knownSource;
+            documents.DestinationRelativeRoot = "Documents";
+            documents.Selected = true;
+            documents.Exists = true;
+
+            SelectionRoot custom = new SelectionRoot();
+            custom.Tier = SelectionTier.Custom;
+            custom.Label = "Work";
+            custom.SourcePath = customSource;
+            custom.DestinationRelativeRoot = @"Moved folders\Work";
+            custom.Selected = true;
+            custom.Exists = true;
+
+            UserSelection user = new UserSelection();
+            user.Profile = profile;
+            user.Selected = true;
+            user.Roots.Add(documents);
+            user.Roots.Add(custom);
+
+            TransferSelection selection = new TransferSelection();
+            selection.Users.Add(user);
+            selection.Exclusions = ExclusionRules.CreateDefault();
+            selection.IncludeHidden = true;
+            return selection;
+        }
+
+        /// <summary>Points the known-folder resolver at a scratch profile for one test.</summary>
+        private static void UseFakeProfile(string fakeProfile, out string desktop, out string documents)
+        {
+            desktop = LongPath.ToDisplay(LongPath.Combine(fakeProfile, "Desktop"));
+            documents = LongPath.ToDisplay(LongPath.Combine(fakeProfile, "Documents"));
+
+            int error;
+            NativeFile.CreateDirectoryRecursive(desktop, out error);
+            NativeFile.CreateDirectoryRecursive(documents, out error);
+
+            string capturedDesktop = desktop;
+            string capturedDocuments = documents;
+            string capturedProfile = fakeProfile;
+
+            LocalKnownFolders.ResolveOverride = delegate(KnownFolder f)
+            {
+                if (f == KnownFolder.Desktop) { return capturedDesktop; }
+                if (f == KnownFolder.Documents) { return capturedDocuments; }
+                return LongPath.ToDisplay(LongPath.Combine(capturedProfile, f.ToString()));
+            };
+        }
+
+        private static void RegisterRestoreLayout(TestRunner runner)
+        {
+            runner.Group("Restore layout");
+
+            runner.Test("only the five agreed known folders are put back in place", delegate
+            {
+                Assert.Equal(5, LocalKnownFolders.Restorable.Length, "exactly five folders");
+
+                KnownFolder parsed;
+                Assert.True(LocalKnownFolders.TryParseDestinationName("Documents", out parsed)
+                            && parsed == KnownFolder.Documents, "Documents is restorable");
+                Assert.True(LocalKnownFolders.TryParseDestinationName("Downloads", out parsed)
+                            && parsed == KnownFolder.Downloads, "Downloads is restorable");
+                Assert.True(LocalKnownFolders.TryParseDestinationName("Music", out parsed)
+                            && parsed == KnownFolder.Music, "Music is restorable");
+                Assert.True(LocalKnownFolders.TryParseDestinationName("Videos", out parsed)
+                            && parsed == KnownFolder.Videos, "Videos is restorable");
+                Assert.True(LocalKnownFolders.TryParseDestinationName("Desktop", out parsed)
+                            && parsed == KnownFolder.Desktop, "Desktop is restorable");
+
+                // Real known folders that are deliberately NOT put back in place.
+                Assert.False(LocalKnownFolders.TryParseDestinationName("Pictures", out parsed),
+                             "Pictures is not in the agreed list");
+                Assert.False(LocalKnownFolders.TryParseDestinationName("Favorites", out parsed),
+                             "Favorites is not in the agreed list");
+                Assert.False(LocalKnownFolders.TryParseDestinationName(@"Moved folders\Work", out parsed),
+                             "a custom folder is never treated as a known one");
+            });
+
+            runner.Test("the folders on this PC actually resolve", delegate
+            {
+                for (int i = 0; i < LocalKnownFolders.Restorable.Length; i++)
+                {
+                    KnownFolder folder = LocalKnownFolders.Restorable[i];
+                    string path = LocalKnownFolders.Resolve(folder);
+                    Assert.NotNull(path, folder + " resolves to a path");
+                    Assert.True(path.Length > 3, folder + " looks like a real path: " + path);
+                }
+            });
+
+            runner.Test("known folders go home and everything else lands on the Desktop", delegate
+            {
+                string scratch = TestFs.CreateScratch();
+                try
+                {
+                    string knownSource = LongPath.Combine(scratch, "src-docs");
+                    string customSource = LongPath.Combine(scratch, "src-work");
+                    string destination = LongPath.Combine(scratch, "chosen");
+
+                    TestFs.WriteFile(LongPath.Combine(knownSource, "letter.txt"), "a document");
+                    TestFs.WriteFile(LongPath.Combine(customSource, "notes.txt"), "some work");
+
+                    string fakeDesktop;
+                    string fakeDocuments;
+                    UseFakeProfile(LongPath.Combine(scratch, "newpc"), out fakeDesktop, out fakeDocuments);
+
+                    try
+                    {
+                        CopyOptions options = CopyOptions.Defaults();
+                        string manifestPath = LongPath.ToDisplay(
+                            LongPath.Combine(scratch, "layout.mtnpc-manifest"));
+
+                        int error;
+                        NativeFile.CreateDirectoryRecursive(destination, out error);
+
+                        TransferSelection selection = BuildMixedSelection(knownSource, customSource);
+                        ScanEngine scanner = new ScanEngine(selection, options);
+                        TransferManifest manifest = scanner.Scan(manifestPath, new SilentScanObserver(),
+                                                                 CancellationToken.None);
+                        manifest.SourceMachine = "OLDBOX";
+
+                        using (LocalFolderSink sink = new LocalFolderSink(
+                                   destination, options, null, DestinationLayout.MatchingFolders))
+                        using (PauseGate gate = new PauseGate())
+                        {
+                            TransferEngine engine = new TransferEngine(options, sink,
+                                                                       new SilentTransferObserver());
+                            TransferResult result = engine.Run(manifest, manifestPath,
+                                                               CancellationToken.None, gate);
+                            Assert.Equal(0, result.FilesFailed, "nothing failed");
+                            Assert.Equal(2, result.FilesCopied, "both files were written");
+                        }
+
+                        // Documents went home, with no account folder in between.
+                        Assert.Equal("a document",
+                                     TestFs.ReadAllText(LongPath.Combine(fakeDocuments, "letter.txt")),
+                                     "the document landed in this PC own Documents");
+
+                        // The custom folder went to one folder on the Desktop, named after
+                        // the machine it came from.
+                        string stray = LongPath.Combine(fakeDesktop, "From OLDBOX");
+                        Assert.Equal("some work",
+                                     TestFs.ReadAllText(LongPath.Combine(
+                                         LongPath.Combine(stray, @"Moved folders\Work"), "notes.txt")),
+                                     "the custom folder landed on the Desktop");
+
+                        // And nothing was dumped into the folder the operator picked.
+                        Assert.False(NativeFile.Exists(LongPath.Combine(
+                                         LongPath.Combine(destination, "testuser"), @"Documents\letter.txt")),
+                                     "the single-folder layout was not used as well");
+                    }
+                    finally
+                    {
+                        LocalKnownFolders.ResolveOverride = null;
+                    }
+                }
+                finally
+                {
+                    TestFs.DeleteTree(scratch);
+                }
+            });
+
+            runner.Test("the single-folder layout is unchanged and stays the default", delegate
+            {
+                string scratch = TestFs.CreateScratch();
+                try
+                {
+                    string source = LongPath.Combine(scratch, "src");
+                    string destination = LongPath.Combine(scratch, "dst");
+                    TestFs.WriteFile(LongPath.Combine(source, "plain.txt"), "hello");
+
+                    TransferManifest manifest;
+                    TransferResult result = RunTransfer(source, destination,
+                                                        CopyOptions.Defaults(), out manifest);
+
+                    Assert.Equal(0, result.FilesFailed, "nothing failed");
+                    Assert.Equal("hello",
+                                 TestFs.ReadAllText(LongPath.Combine(LongPath.Combine(
+                                     LongPath.Combine(destination, "testuser"), "Data"), "plain.txt")),
+                                 "still lands under destination, account, root");
+                }
+                finally
+                {
+                    TestFs.DeleteTree(scratch);
+                }
+            });
+
+            runner.Test("a second account never merges into the folders of this PC", delegate
+            {
+                string scratch = TestFs.CreateScratch();
+                try
+                {
+                    string fakeDesktop;
+                    string fakeDocuments;
+                    UseFakeProfile(LongPath.Combine(scratch, "newpc"), out fakeDesktop, out fakeDocuments);
+
+                    try
+                    {
+                        // Two accounts, both with a Documents root. Merging them would be a
+                        // data-loss bug, so only the first may be mapped onto this PC.
+                        TransferManifest manifest = new TransferManifest();
+                        manifest.ManifestId = "two-users";
+                        manifest.CreatedUtc = DateTime.UtcNow;
+                        manifest.SourceMachine = "OLDBOX";
+                        manifest.ToolVersion = "test";
+
+                        for (int u = 0; u < 2; u++)
+                        {
+                            ManifestUser user = new ManifestUser();
+                            user.UserIndex = u;
+                            user.Sid = "S-1-5-21-0-0-0-100" + u.ToString();
+                            user.AccountName = u == 0 ? "alice" : "bob";
+                            user.ProfilePath = @"C:\Users\" + user.AccountName;
+
+                            ManifestRoot root = new ManifestRoot();
+                            root.UserIndex = u;
+                            root.RootIndex = 0;
+                            root.Tier = SelectionTier.KnownFolder;
+                            root.SourcePath = user.ProfilePath + @"\Documents";
+                            root.DestinationRelativeRoot = "Documents";
+                            root.Label = "Documents";
+                            user.Roots.Add(root);
+
+                            manifest.Users.Add(user);
+                        }
+
+                        string destination = LongPath.Combine(scratch, "chosen");
+                        int error;
+                        NativeFile.CreateDirectoryRecursive(destination, out error);
+
+                        using (LocalFolderSink sink = new LocalFolderSink(
+                                   destination, CopyOptions.Defaults(), null,
+                                   DestinationLayout.MatchingFolders))
+                        {
+                            sink.BeginSession(manifest);
+                            sink.EndSession(true);
+                        }
+
+                        // The second account gets its own folder under the Desktop drop.
+                        string bobRoot = LongPath.Combine(
+                            LongPath.Combine(LongPath.Combine(fakeDesktop, "From OLDBOX"), "bob"),
+                            "Documents");
+                        Assert.True(NativeFile.DirectoryExists(bobRoot),
+                                    "the second account went to its own folder: "
+                                    + LongPath.ToDisplay(bobRoot));
+                    }
+                    finally
+                    {
+                        LocalKnownFolders.ResolveOverride = null;
+                    }
+                }
+                finally
+                {
+                    TestFs.DeleteTree(scratch);
+                }
+            });
+        }
 
         private static void RegisterProfiles(TestRunner runner)
         {

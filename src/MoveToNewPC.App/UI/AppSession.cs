@@ -23,12 +23,7 @@ namespace MoveToNewPC.UI
         /// <summary>Same code path as LAN; the UI helps with link-local addressing.</summary>
         DirectCable,
         /// <summary>Encrypted package on an external drive or share.</summary>
-        OfflinePackage,
-        /// <summary>
-        /// No network at all: copy straight into a folder on this machine. Exists so the
-        /// file engine can be exercised end-to-end before the network transport lands.
-        /// </summary>
-        LocalFolder
+        OfflinePackage
     }
 
     /// <summary>State shared by the wizard pages. One instance per MainForm.</summary>
@@ -43,8 +38,33 @@ namespace MoveToNewPC.UI
         public TransferSelection Selection = new TransferSelection();
         public CopyOptions CopyOptions = CopyOptions.Defaults();
 
-        /// <summary>Destination folder for LocalFolder / OfflinePackage modes.</summary>
+        /// <summary>Where restored files land on the new PC.</summary>
         public string DestinationFolder;
+
+        /// <summary>
+        /// Receiver only. SingleFolder by default: putting everything in one place cannot
+        /// disturb anything already on this PC, so it is the safe default to ship.
+        /// </summary>
+        public MoveToNewPC.Core.Transfer.DestinationLayout Layout =
+            MoveToNewPC.Core.Transfer.DestinationLayout.SingleFolder;
+
+        /// <summary>Full path of the .mtnpc-package being written or read.</summary>
+        public string PackagePath;
+
+        /// <summary>
+        /// Never persisted and never logged. Held only for the life of the wizard so the
+        /// sink and the reader can derive their keys.
+        /// </summary>
+        public string PackagePassphrase;
+
+        /// <summary>
+        /// The paired connection, once a LAN pairing screen has established one. The
+        /// transfer page takes it over and owns closing it.
+        /// </summary>
+        public MoveToNewPC.Core.Net.SecureChannel Channel;
+
+        /// <summary>Set by the receiver's pairing screen so the transfer page can show it.</summary>
+        public string PeerMachineName;
 
         public TransferManifest Manifest;
         public string ManifestPath;
@@ -63,6 +83,15 @@ namespace MoveToNewPC.UI
             Selection = new TransferSelection();
             CopyOptions = CopyOptions.Defaults();
             DestinationFolder = null;
+            Layout = MoveToNewPC.Core.Transfer.DestinationLayout.SingleFolder;
+            PackagePath = null;
+            PackagePassphrase = null;
+            if (Channel != null)
+            {
+                Channel.Dispose();
+                Channel = null;
+            }
+            PeerMachineName = null;
             Manifest = null;
             ManifestPath = null;
             LastResult = null;

@@ -13,7 +13,6 @@ namespace MoveToNewPC.UI
         private RadioButton _lan;
         private RadioButton _cable;
         private RadioButton _offline;
-        private RadioButton _local;
 
         public TransportPage()
         {
@@ -36,32 +35,29 @@ namespace MoveToNewPC.UI
 
             _lan = Add("Same &network (recommended)",
                        "Both PCs are on the same Wi-Fi or wired network. They find each other automatically.",
-                       20, false, "Arrives in milestone M3");
+                       20, true, null);
+            _lan.Checked = true;
 
             _cable = Add("Direct &Ethernet cable between the two PCs",
                          "No router needed. Plug a cable between both PCs and wait about a minute for them to sort out addresses.",
-                         88, false, "Arrives in milestone M3");
+                         88, true, null);
 
             _offline = Add("&External drive or shared folder",
-                           "Use when the two PCs are never switched on at the same time. Writes one encrypted package you carry across.",
-                           156, false, "Arrives in milestone M6");
-
-            _local = Add("&Copy into a folder on this PC",
-                         "No network at all. Copies the selected files straight into a folder you choose - a USB disk, a second drive, anywhere.",
-                         224, true, null);
-            _local.Checked = true;
+                           "Use a USB disk, an external drive or a shared folder. Writes one encrypted package you carry across, then restores it on the new PC.",
+                           156, true, null);
 
             Label note = new Label();
             note.AutoSize = false;
-            note.Location = new Point(28, 300);
-            note.Size = new Size(720, 72);
+            note.Location = new Point(28, 232);
+            note.Size = new Size(720, 88);
             note.ForeColor = SystemColors.GrayText;
             note.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-            note.Text = "This build is milestone M2: profile discovery and the file engine are finished and "
-                        + "usable end to end, but the network transports are not built yet."
+            note.Text = "Everything is encrypted either way. Over the network the two PCs prove they know "
+                        + "the same six-digit code before a single file moves; on a drive, the package is "
+                        + "locked with a password you choose."
                         + Environment.NewLine + Environment.NewLine
-                        + "The last option does everything except the network hop, and uses exactly the same "
-                        + "scanning, filtering, verification and reporting code the network transfer will use.";
+                        + "Run this program on both PCs: choose 'old' on the one you are leaving and 'new' "
+                        + "on the one you are moving to.";
             Controls.Add(note);
         }
 
@@ -93,20 +89,17 @@ namespace MoveToNewPC.UI
         {
             if (_lan.Checked) { Session.Transport = TransportKind.Lan; }
             else if (_cable.Checked) { Session.Transport = TransportKind.DirectCable; }
-            else if (_offline.Checked) { Session.Transport = TransportKind.OfflinePackage; }
-            else { Session.Transport = TransportKind.LocalFolder; }
+            else { Session.Transport = TransportKind.OfflinePackage; }
 
             MoveToNewPC.Core.Diagnostics.Log.Info("Transport chosen: " + Session.Transport);
 
+            bool overNetwork = Session.Transport == TransportKind.Lan
+                               || Session.Transport == TransportKind.DirectCable;
+
             if (Session.Role == AppRole.Receiver)
             {
-                return new NotAvailablePage(
-                    "Receiving is not in this build yet",
-                    "The receiver side arrives with the network transport in milestone M3, and the "
-                    + "account mapping and resume support in M4."
-                    + Environment.NewLine + Environment.NewLine
-                    + "In this build, run the program on the OLD PC and copy into a folder - for example "
-                    + "onto a USB disk - then carry that disk across.");
+                // The receiver never chooses what to send: it waits, or opens a package.
+                return overNetwork ? (WizardPage)new LanReceivePage() : new PackageRestorePage();
             }
 
             return new UserSelectPage();

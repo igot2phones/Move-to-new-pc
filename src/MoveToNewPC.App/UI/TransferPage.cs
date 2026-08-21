@@ -7,6 +7,8 @@ using MoveToNewPC.Core.Diagnostics;
 using MoveToNewPC.Core.IO;
 using MoveToNewPC.Core.Manifests;
 using MoveToNewPC.Core.Model;
+using MoveToNewPC.Core.Net;
+using MoveToNewPC.Core.Package;
 using MoveToNewPC.Core.Reporting;
 using MoveToNewPC.Core.Transfer;
 using MoveToNewPC.Core.Util;
@@ -174,12 +176,28 @@ namespace MoveToNewPC.UI
 
         private void Work()
         {
+            // The receiver has no scan to do: everything it needs arrives in the stream.
+            if (Session.Role == AppRole.Receiver)
+            {
+                if (Session.Channel != null)
+                {
+                    NetworkReceiveWork();
+                }
+                else
+                {
+                    RestoreWork();
+                }
+                return;
+            }
+
             string manifestDirectory = null;
             try
             {
                 bool dryRun = Session.CopyOptions.DryRun;
 
-                manifestDirectory = dryRun
+                // A network send has no local destination folder, so its manifest lives
+                // beside the log like a dry run's does.
+                manifestDirectory = (dryRun || Session.Channel != null || string.IsNullOrEmpty(Session.DestinationFolder))
                     ? Log.DataDirectory
                     : LongPath.Combine(Session.DestinationFolder, "_MoveToNewPC");
 
@@ -230,13 +248,18 @@ namespace MoveToNewPC.UI
                     SetPhase("Dry run: working out exactly what would be copied...");
                     sink = new NullSink();
                 }
+                else if (Session.Channel != null)
+                {
+                    SetPhase("Sending to " + Session.PeerMachineName + "...");
+                    sink = new NetworkSink(Session.Channel, false);
+                }
                 else
                 {
-                    SetPhase("Copying files...");
+                    SetPhase("Writing the encrypted package...");
                     string journalPath = LongPath.ToDisplay(
                         LongPath.Combine(manifestDirectory, "transfer" + CompletionJournal.FileExtension));
                     journal = CompletionJournal.OpenOrCreate(journalPath, manifest.ManifestId);
-                    sink = new LocalFolderSink(Session.DestinationFolder, Session.CopyOptions, journal);
+                    sink = new PackageSink(Session.PackagePath, Session.PackagePassphrase);
                 }
 
                 try
@@ -254,7 +277,14 @@ namespace MoveToNewPC.UI
                 }
                 finally
                 {
+                    // Order matters: the sink flushes its last frame on dispose, so the
+                    // socket underneath it has to outlive it.
                     sink.Dispose();
+                    if (Session.Channel != null)
+                    {
+                        Session.Channel.Dispose();
+                        Session.Channel = null;
+                    }
                     if (journal != null)
                     {
                         journal.Dispose();
@@ -264,6 +294,135 @@ namespace MoveToNewPC.UI
             catch (Exception ex)
             {
                 Log.Error("Transfer thread failed", ex);
+                TransferResult failed = new TransferResult();
+                failed.StartedUtc = _startedUtc;
+                failed.FinishedUtc = DateTime.UtcNow;
+                failed.FailureMessage = ex.Message;
+                _failure = ex.Message;
+                Finish(failed);
+            }
+        }
+
+        /// <summary>
+        /// Receiver side over the network: the pairing screen already established the
+        /// channel, so this just reads the record stream off it into the chosen folder.
+        /// </summary>
+        private void NetworkReceiveWork()
+        {
+            try
+            {
+                SetPhase("Waiting for " + Session.PeerMachineName + " to describe the transfer...");
+
+                using (SecureChannel channel = Session.Channel)
+                {
+                    Session.Channel = null;      // we own it from here
+
+                    RecordRestorer restorer = new RecordRestorer(channel.Reader);
+                    restorer.ReadHeader();
+
+                    Session.Manifest = restorer.Manifest;
+
+                    Interlocked.Exchange(ref _bytesTotal, restorer.Manifest.Totals.ByteCount);
+                    Interlocked.Exchange(ref _filesTotal, restorer.Manifest.Totals.FileCount);
+                    Interlocked.Exchange(ref _bytesDone, 0);
+                    Interlocked.Exchange(ref _filesDone, 0);
+
+                    SetPhase("Receiving from " + Session.PeerMachineName + "...");
+
+                    string journalDirectory = LongPath.Combine(Session.DestinationFolder, "_MoveToNewPC");
+                    int error;
+                    NativeFile.CreateDirectoryRecursive(journalDirectory, out error);
+
+                    string journalPath = LongPath.ToDisplay(LongPath.Combine(
+                        journalDirectory, "receive" + CompletionJournal.FileExtension));
+
+                    using (CompletionJournal journal =
+                               CompletionJournal.OpenOrCreate(journalPath, restorer.Manifest.ManifestId))
+                    using (LocalFolderSink sink =
+                               new LocalFolderSink(Session.DestinationFolder, Session.CopyOptions,
+                                                   journal, Session.Layout))
+                    {
+                        TransferResult result = restorer.Restore(sink, this, _cancel.Token, _pause);
+                        if (result.FailureMessage != null)
+                        {
+                            _failure = result.FailureMessage;
+                        }
+                        Finish(result);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error("Network receive failed", ex);
+                TransferResult failed = new TransferResult();
+                failed.StartedUtc = _startedUtc;
+                failed.FinishedUtc = DateTime.UtcNow;
+                failed.FailureMessage = ex.Message;
+                _failure = ex.Message;
+                Finish(failed);
+            }
+        }
+
+        /// <summary>
+        /// Receiver side: unpack an encrypted package into the chosen folder. The bytes go
+        /// through the ordinary LocalFolderSink, so path validation, the collision policy,
+        /// hash verification and the resume journal are all the same code a local copy uses.
+        /// </summary>
+        private void RestoreWork()
+        {
+            try
+            {
+                SetPhase("Opening the package...");
+
+                string openError;
+                using (PackageReader reader = PackageReader.Open(
+                           Session.PackagePath, Session.PackagePassphrase, out openError))
+                {
+                    if (reader == null)
+                    {
+                        TransferResult refused = new TransferResult();
+                        refused.StartedUtc = _startedUtc;
+                        refused.FinishedUtc = DateTime.UtcNow;
+                        refused.FailureMessage = openError;
+                        _failure = openError;
+                        Finish(refused);
+                        return;
+                    }
+
+                    Session.Manifest = reader.Manifest;
+
+                    Interlocked.Exchange(ref _bytesTotal, reader.Manifest.Totals.ByteCount);
+                    Interlocked.Exchange(ref _filesTotal, reader.Manifest.Totals.FileCount);
+                    Interlocked.Exchange(ref _bytesDone, 0);
+                    Interlocked.Exchange(ref _filesDone, 0);
+
+                    SetPhase("Restoring files...");
+
+                    string journalDirectory = LongPath.Combine(Session.DestinationFolder, "_MoveToNewPC");
+                    int error;
+                    NativeFile.CreateDirectoryRecursive(journalDirectory, out error);
+
+                    string journalPath = LongPath.ToDisplay(LongPath.Combine(
+                        journalDirectory, "restore" + CompletionJournal.FileExtension));
+
+                    using (CompletionJournal journal =
+                               CompletionJournal.OpenOrCreate(journalPath, reader.Manifest.ManifestId))
+                    using (LocalFolderSink sink =
+                               new LocalFolderSink(Session.DestinationFolder, Session.CopyOptions,
+                                                   journal, Session.Layout))
+                    {
+                        TransferResult result = reader.Restore(sink, this, _cancel.Token, _pause);
+                        if (result.FailureMessage != null)
+                        {
+                            _failure = result.FailureMessage;
+                        }
+                        Finish(result);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error("Restore thread failed", ex);
                 TransferResult failed = new TransferResult();
                 failed.StartedUtc = _startedUtc;
                 failed.FinishedUtc = DateTime.UtcNow;

@@ -7,6 +7,17 @@ using MoveToNewPC.Core.Profiles;
 namespace MoveToNewPC.Core.Selection
 {
     /// <summary>
+    /// What kind of application data an entry is, so the UI can offer "all browsers" or
+    /// "all mail" as one tick rather than making the operator recognise twelve folder names.
+    /// </summary>
+    public enum AppDataCategory
+    {
+        Other = 0,
+        Browser = 1,
+        Mail = 2
+    }
+
+    /// <summary>
     /// Tier B: a curated allow-list of application data, never all of AppData. Every entry
     /// is detected on the source machine first; entries that are not there are not shown.
     ///
@@ -24,54 +35,118 @@ namespace MoveToNewPC.Core.Selection
         public string DestinationRelativeRoot;
         /// <summary>When set, the entry hangs off a known folder instead of the profile root.</summary>
         public bool UnderDocuments;
+        public AppDataCategory Category;
 
         public AppDataItem(string relativePath, string label, string note)
+            : this(relativePath, label, note, AppDataCategory.Other)
+        {
+        }
+
+        public AppDataItem(string relativePath, string label, string note, AppDataCategory category)
         {
             RelativePath = relativePath;
             Label = label;
             Note = note;
+            Category = category;
             DestinationRelativeRoot = relativePath;
         }
     }
 
     public static class AppDataCatalog
     {
+        /// <summary>
+        /// Every Chromium-based browser keeps the same "User Data" shape, so they all carry
+        /// the same warning: the password store is encrypted with a key tied to this Windows
+        /// account and will not decrypt anywhere else. Bookmarks, history and extensions do
+        /// come across.
+        /// </summary>
+        private const string ChromiumNote =
+            "Bookmarks, history and extensions come across. Saved passwords are encrypted against "
+            + "this Windows account and will NOT decrypt on the new PC. Close the browser first.";
+
         public static List<AppDataItem> AllCandidates()
         {
             List<AppDataItem> items = new List<AppDataItem>();
 
+            // ---- browsers -------------------------------------------------------------
             items.Add(new AppDataItem(@"AppData\Local\Google\Chrome\User Data",
-                "Google Chrome profile (bookmarks, history, extensions)",
-                "Best effort. Passwords are tied to this Windows account and will not decrypt on the new PC."));
+                "Google Chrome", ChromiumNote, AppDataCategory.Browser));
+
+            items.Add(new AppDataItem(@"AppData\Local\Google\Chrome Beta\User Data",
+                "Google Chrome Beta", ChromiumNote, AppDataCategory.Browser));
 
             items.Add(new AppDataItem(@"AppData\Local\Microsoft\Edge\User Data",
-                "Microsoft Edge profile",
-                "Best effort. Saved passwords are tied to this Windows account and will not decrypt on the new PC."));
+                "Microsoft Edge", ChromiumNote, AppDataCategory.Browser));
 
             items.Add(new AppDataItem(@"AppData\Local\BraveSoftware\Brave-Browser\User Data",
-                "Brave profile",
-                "Best effort. Saved passwords will not decrypt on the new PC."));
+                "Brave", ChromiumNote, AppDataCategory.Browser));
+
+            items.Add(new AppDataItem(@"AppData\Local\Vivaldi\User Data",
+                "Vivaldi", ChromiumNote, AppDataCategory.Browser));
+
+            items.Add(new AppDataItem(@"AppData\Local\Chromium\User Data",
+                "Chromium", ChromiumNote, AppDataCategory.Browser));
+
+            items.Add(new AppDataItem(@"AppData\Roaming\Opera Software\Opera Stable",
+                "Opera", ChromiumNote, AppDataCategory.Browser));
+
+            items.Add(new AppDataItem(@"AppData\Roaming\Opera Software\Opera GX Stable",
+                "Opera GX", ChromiumNote, AppDataCategory.Browser));
 
             items.Add(new AppDataItem(@"AppData\Roaming\Mozilla\Firefox",
-                "Mozilla Firefox profiles",
-                "Includes profiles.ini and all profile folders. Firefox should be closed before copying."));
+                "Mozilla Firefox",
+                "Bookmarks, history, saved logins and extensions. Firefox keeps these in its own "
+                + "profile format, so they usually restore cleanly. Close Firefox first.",
+                AppDataCategory.Browser));
 
-            items.Add(new AppDataItem(@"AppData\Roaming\Thunderbird",
-                "Mozilla Thunderbird profiles",
-                "Includes local mail stores. Thunderbird should be closed before copying."));
+            items.Add(new AppDataItem(@"AppData\Roaming\Waterfox",
+                "Waterfox",
+                "Same profile format as Firefox. Close it before copying.",
+                AppDataCategory.Browser));
 
+            // ---- mail -----------------------------------------------------------------
             AppDataItem outlookFiles = new AppDataItem(@"Outlook Files",
-                "Outlook data files (.pst) in Documents",
-                "PST files are your actual mail. Outlook must be closed or they will be locked.");
+                "Outlook data files (.pst)",
+                "This is your actual mail. Outlook MUST be closed or the files are locked and will "
+                + "be skipped. On the new PC, open them with File > Open > Outlook Data File.",
+                AppDataCategory.Mail);
             outlookFiles.UnderDocuments = true;
             outlookFiles.DestinationRelativeRoot = @"Documents\Outlook Files";
             items.Add(outlookFiles);
 
             items.Add(new AppDataItem(@"AppData\Local\Microsoft\Outlook",
-                "Outlook local data (.ost / .nst caches)",
-                "OST files are a re-downloadable cache of a server mailbox - usually NOT worth moving. "
-                + "They are often many gigabytes and Outlook rebuilds them automatically."));
+                "Outlook cached mailbox (.ost / .nst)",
+                "Usually NOT worth moving: an OST is a re-downloadable copy of a server mailbox, "
+                + "often many gigabytes, and Outlook rebuilds it automatically. Move it only for "
+                + "an account that no longer exists on the server.",
+                AppDataCategory.Mail));
 
+            items.Add(new AppDataItem(@"AppData\Roaming\Microsoft\Signatures",
+                "Outlook signatures",
+                "Small and usually restores cleanly.", AppDataCategory.Mail));
+
+            items.Add(new AppDataItem(@"AppData\Roaming\Microsoft\Templates",
+                "Office templates (Normal.dotm and friends)",
+                "Version sensitive; usually restores cleanly."));
+
+            items.Add(new AppDataItem(@"AppData\Roaming\Thunderbird",
+                "Mozilla Thunderbird",
+                "Includes profiles.ini and the local mail stores, which is the mail itself. "
+                + "Thunderbird MUST be closed or the stores are locked.",
+                AppDataCategory.Mail));
+
+            items.Add(new AppDataItem(@"AppData\Local\Microsoft\Windows Live Mail",
+                "Windows Live Mail",
+                "Common on Windows 7 machines. The app is discontinued; on the new PC you will need "
+                + "to import the store into another mail program.",
+                AppDataCategory.Mail));
+
+            items.Add(new AppDataItem(@"AppData\Roaming\eM Client",
+                "eM Client",
+                "Includes the local database. Close eM Client before copying.",
+                AppDataCategory.Mail));
+
+            // ---- everything else ------------------------------------------------------
             items.Add(new AppDataItem(@"AppData\Roaming\Microsoft\Sticky Notes",
                 "Sticky Notes (legacy StickyNotes.snt)",
                 "Windows 7/8 era Sticky Notes."));
@@ -79,14 +154,6 @@ namespace MoveToNewPC.Core.Selection
             items.Add(new AppDataItem(@"AppData\Local\Packages\Microsoft.MicrosoftStickyNotes_8wekyb3d8bbwe\LocalState",
                 "Sticky Notes (modern plum.sqlite)",
                 "Windows 10/11 Sticky Notes. The new PC needs the Sticky Notes app installed before this helps."));
-
-            items.Add(new AppDataItem(@"AppData\Roaming\Microsoft\Signatures",
-                "Outlook signatures",
-                "Small and usually restores cleanly."));
-
-            items.Add(new AppDataItem(@"AppData\Roaming\Microsoft\Templates",
-                "Office templates (Normal.dotm and friends)",
-                "Version sensitive; usually restores cleanly."));
 
             items.Add(new AppDataItem(@"AppData\Roaming\Microsoft\Windows\Recent",
                 "Recent items list",
@@ -140,6 +207,7 @@ namespace MoveToNewPC.Core.Selection
                 root.Selected = false;   // Tier B is off by default, one checkbox away.
                 root.Exists = true;
                 root.Note = item.Note;
+                root.Category = item.Category;
                 roots.Add(root);
             }
 

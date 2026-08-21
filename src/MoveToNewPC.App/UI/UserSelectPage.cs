@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Globalization;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
@@ -28,6 +29,8 @@ namespace MoveToNewPC.UI
         private LinkLabel _filteredLink;
         private CheckBox _advancedCheck;
         private CheckBox _appDataCheck;
+        private Button _browsersButton;
+        private Button _mailButton;
         private Button _refreshButton;
         private System.Windows.Forms.Timer _refreshTimer;
         private Splitter _splitter;
@@ -113,7 +116,7 @@ namespace MoveToNewPC.UI
 
             Panel top = new Panel();
             top.Dock = DockStyle.Top;
-            top.Height = 58;
+            top.Height = 84;
 
             _advancedCheck = new CheckBox();
             _advancedCheck.Text = "&Advanced: choose individual folders";
@@ -129,19 +132,31 @@ namespace MoveToNewPC.UI
             _appDataCheck.UseVisualStyleBackColor = true;
             _appDataCheck.CheckedChanged += AppDataOnCheckedChanged;
 
+            // One click for the two things people actually ask for by name. They only make
+            // sense once Tier B has been detected, so they follow the app-data checkbox.
+            _browsersButton = Ui.MakeButton("Select &browsers", 130);
+            _browsersButton.Location = new Point(0, 30);
+            _browsersButton.Enabled = false;
+            _browsersButton.Click += BrowsersOnClick;
+
+            _mailButton = Ui.MakeButton("Select &email", 130);
+            _mailButton.Location = new Point(138, 30);
+            _mailButton.Enabled = false;
+            _mailButton.Click += MailOnClick;
+
             _refreshButton = Ui.MakeButton("&Rescan", 92);
             _refreshButton.Location = new Point(600, 2);
             _refreshButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             _refreshButton.Click += RefreshOnClick;
 
             _statusLabel = new Label();
-            _statusLabel.Location = new Point(0, 32);
+            _statusLabel.Location = new Point(0, 58);
             _statusLabel.Size = new Size(560, 20);
             _statusLabel.ForeColor = SystemColors.GrayText;
             _statusLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
             _filteredLink = new LinkLabel();
-            _filteredLink.Location = new Point(0, 32);
+            _filteredLink.Location = new Point(0, 58);
             _filteredLink.Size = new Size(560, 20);
             _filteredLink.Visible = false;
             _filteredLink.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
@@ -149,6 +164,8 @@ namespace MoveToNewPC.UI
 
             top.Controls.Add(_advancedCheck);
             top.Controls.Add(_appDataCheck);
+            top.Controls.Add(_browsersButton);
+            top.Controls.Add(_mailButton);
             top.Controls.Add(_refreshButton);
             top.Controls.Add(_statusLabel);
             top.Controls.Add(_filteredLink);
@@ -314,6 +331,23 @@ namespace MoveToNewPC.UI
 
         private void UpdateStatus()
         {
+            // The category buttons can only work on Tier B roots, which only exist once the
+            // app-data checkbox has caused them to be detected.
+            bool anyBrowser = false;
+            bool anyMail = false;
+            for (int u = 0; u < _users.Count && !(anyBrowser && anyMail); u++)
+            {
+                List<SelectionRoot> roots = _users[u].Roots;
+                for (int r = 0; r < roots.Count; r++)
+                {
+                    if (roots[r].Tier != SelectionTier.AppData || !roots[r].Exists) { continue; }
+                    if (roots[r].Category == AppDataCategory.Browser) { anyBrowser = true; }
+                    else if (roots[r].Category == AppDataCategory.Mail) { anyMail = true; }
+                }
+            }
+            _browsersButton.Enabled = anyBrowser;
+            _mailButton.Enabled = anyMail;
+
             ProfileEnumerationResult profiles = Session.Profiles;
             if (profiles == null)
             {
@@ -446,6 +480,68 @@ namespace MoveToNewPC.UI
             {
                 ShowFoldersForSelectedUser();
             }
+        }
+
+        private void BrowsersOnClick(object sender, EventArgs e)
+        {
+            SelectCategory(AppDataCategory.Browser, "browser");
+        }
+
+        private void MailOnClick(object sender, EventArgs e)
+        {
+            SelectCategory(AppDataCategory.Mail, "email");
+        }
+
+        /// <summary>
+        /// Ticks every detected Tier B root of one category, across every selected account,
+        /// and reports how many were found. Nothing is unticked: this adds to the selection
+        /// rather than replacing it.
+        /// </summary>
+        private void SelectCategory(AppDataCategory category, string what)
+        {
+            int matched = 0;
+            for (int u = 0; u < _users.Count; u++)
+            {
+                UserSelection user = _users[u];
+                bool touched = false;
+
+                for (int r = 0; r < user.Roots.Count; r++)
+                {
+                    SelectionRoot root = user.Roots[r];
+                    if (root.Tier != SelectionTier.AppData || root.Category != category || !root.Exists)
+                    {
+                        continue;
+                    }
+                    if (!root.Selected)
+                    {
+                        root.Selected = true;
+                        touched = true;
+                    }
+                    matched++;
+                }
+
+                // Selecting data for an account nobody ticked would silently do nothing.
+                if (touched && !user.Selected)
+                {
+                    user.Selected = true;
+                }
+            }
+
+            if (matched == 0)
+            {
+                _statusLabel.Text = "No " + what + " data was found on this PC.";
+            }
+            else
+            {
+                _statusLabel.Text = "Selected " + matched.ToString(CultureInfo.InvariantCulture)
+                                    + " " + what + " item(s). Sizes are still being counted.";
+            }
+
+            ShowFoldersForSelectedUser();
+            RefreshFolderLabels();
+            StartSizeCalculator();
+            UpdateStatus();
+            Host.RefreshChrome();
         }
 
         private void AppDataOnCheckedChanged(object sender, EventArgs e)

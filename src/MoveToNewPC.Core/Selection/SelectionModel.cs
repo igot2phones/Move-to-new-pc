@@ -30,6 +30,8 @@ namespace MoveToNewPC.Core.Selection
 
         public bool Selected;
         public bool Exists;
+        /// <summary>Only meaningful for Tier B; lets the UI offer browsers or mail as a group.</summary>
+        public AppDataCategory Category = AppDataCategory.Other;
         /// <summary>Shown next to the entry: "re-creatable", "version sensitive", etc.</summary>
         public string Note;
 

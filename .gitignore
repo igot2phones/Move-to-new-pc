@@ -7,6 +7,10 @@ bin/
 *.suo
 *.pdb
 
+# Binaries staged for a GitHub release. Built from source on demand; upload them as
+# release assets rather than committing them.
+release-*/
+
 # Output of tools\windows-verify.cmd. Never commit this: it records the machine name and
 # the operator's profile path, and the nasty tree it builds contains junctions and a
 # multi-gigabyte sparse file that git would expand to its full logical size.
