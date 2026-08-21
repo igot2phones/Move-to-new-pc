@@ -1,0 +1,16 @@
+# Build output and the downloaded net40 reference assemblies. build.sh re-fetches
+# build/refs/ on demand, so none of this belongs in the repository.
+build/
+obj/
+bin/
+*.user
+*.suo
+*.pdb
+
+# Logs, reports and manifests produced by running the app next to the EXE.
+MoveToNewPC.log*
+MoveToNewPC-report-*.txt
+MoveToNewPC-report-*.html
+*.mtnpc-manifest
+*.mtnpc-journal
+*.mtnpc-part
