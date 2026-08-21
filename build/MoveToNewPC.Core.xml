@@ -1,0 +1,840 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>MoveToNewPC.Core</name>
+    </assembly>
+    <members>
+        <member name="T:MoveToNewPC.Core.Diagnostics.Log">
+            <summary>
+            Rolling plain-text log, one line per event, UTC timestamps.
+            Never write key material, the pairing code, or file contents through this class.
+            </summary>
+        </member>
+        <member name="P:MoveToNewPC.Core.Diagnostics.Log.DataDirectory">
+            <summary>Directory the log and any settings/journals live in.</summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Diagnostics.Log.Initialise(System.String)">
+            <summary>
+            Chooses the data directory: next to the EXE when that is writable (portable USB
+            use), otherwise %LOCALAPPDATA%\MoveToNewPC. Safe to call more than once.
+            </summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.IO.DirectoryWalker">
+             <summary>
+             Recursive directory enumeration over FindFirstFileW/FindNextFileW with \\?\ paths.
+            
+             Iterative rather than recursive on purpose: a real profile can nest deeply enough
+             (especially node_modules and mail stores) that a recursive walker overflows the
+             stack before it overflows MAX_PATH.
+            
+             The walker never throws for per-item problems. Access denied, a lock, a vanished
+             file - all of them become an OnSkip callback and the walk continues. One bad file
+             must never abort a 200 GB migration.
+             </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.IO.DirectoryWalker.Walk(System.String,MoveToNewPC.Core.IO.WalkOptions,MoveToNewPC.Core.IO.IWalkObserver,System.Threading.CancellationToken)">
+            <summary>
+            Walks <paramref name="root"/> depth-first. The root itself is not reported;
+            relative paths are relative to it.
+            </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.IO.DirectoryWalker.TryGetEntry(System.String,MoveToNewPC.Core.Model.FsEntry@)">
+            <summary>Stats a single path into an <see cref="T:MoveToNewPC.Core.Model.FsEntry"/> without enumerating.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.IO.LongPath">
+             <summary>
+             Path helpers that work past MAX_PATH. Every path handed to a Win32 W-function in
+             this codebase goes through <see cref="M:MoveToNewPC.Core.IO.LongPath.ToExtended(System.String)"/> first.
+            
+             Note that the \\?\ prefix turns OFF Win32 path normalisation: "..", ".", trailing
+             dots and trailing spaces are all passed through literally. That is exactly what we
+             want when copying files a previous tool created badly, but it means callers must
+             hand us paths that are already canonical.
+             </summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.IO.LongPath.MaxExtendedPath">
+            <summary>Longest path we will even attempt. Win32 caps extended paths at ~32767.</summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.IO.LongPath.ToExtended(System.String)">
+            <summary>
+            Converts a normal path to its \\?\ form. Already-extended paths are returned
+            unchanged. Relative paths are resolved against the current directory via
+            GetFullPathNameW (Path.GetFullPath would throw on anything long).
+            </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.IO.LongPath.ToDisplay(System.String)">
+            <summary>Strips the \\?\ decoration so a path can be shown to a human.</summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.IO.LongPath.Combine(System.String,System.String)">
+            <summary>Joins two path fragments without any normalisation surprises.</summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.IO.LongPath.GetRelativePath(System.String,System.String)">
+            <summary>
+            The relative portion of <paramref name="path"/> under <paramref name="root"/>,
+            or null when the path is not actually under the root. Comparison is
+            case-insensitive because Windows file systems are.
+            </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.IO.LongPath.IsReservedDeviceName(System.String)">
+            <summary>
+            True for the MS-DOS device names. Note that "CON.txt" is reserved too - the
+            check is against the name up to the first dot.
+            </summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.IO.NativeFile">
+             <summary>
+             File primitives built directly on CreateFileW and friends so they work past
+             MAX_PATH. .NET 4.0's System.IO cannot be used here: it validates path length in
+             managed code and throws PathTooLongException before the syscall ever happens.
+            
+             Every method takes a normal or extended path and applies LongPath.ToExtended itself.
+             Methods that can legitimately fail return bool plus a Win32 error rather than
+             throwing, because "skip this file and keep going" is the common case.
+             </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.IO.NativeFile.OpenReadHandle(System.String,System.Boolean,System.Int32@)">
+            <summary>
+            Opens a source file for reading with the most permissive share mode there is,
+            so files an application already has open can still be read.
+            <paramref name="allowRecall"/> false adds FILE_FLAG_OPEN_NO_RECALL, which stops
+            the open itself from dragging a cloud placeholder down from the network.
+            </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.IO.NativeFile.CreateWriteHandle(System.String,System.Boolean,System.Int32@)">
+            <summary>Creates or truncates a destination file. Fails if the parent is missing.</summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.IO.NativeFile.OpenForResume(System.String,System.Int32,System.Int32@)">
+            <summary>
+            Opens an existing file for append/resume. Returns null with the Win32 error when
+            it does not exist.
+            </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.IO.NativeFile.SetTimes(Microsoft.Win32.SafeHandles.SafeFileHandle,System.Int64,System.Int64,System.Int64)">
+            <summary>
+            Applies creation/access/write times to an open handle. Pass 0 for "leave alone".
+            Timestamps are FILETIME ticks, not DateTime ticks.
+            </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.IO.NativeFile.SetTimes(System.String,System.Int64,System.Int64,System.Int64,System.Int32@)">
+            <summary>Same as the handle overload of SetTimes, but opens the path itself.</summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.IO.NativeFile.CreateDirectoryRecursive(System.String,System.Int32@)">
+            <summary>
+            Creates a directory and every missing parent. Walks upward first because
+            CreateDirectoryW does not create intermediate levels.
+            </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.IO.NativeFile.TryGetFreeSpace(System.String,System.Int64@,System.Int64@)">
+            <summary>
+            Free bytes available to the calling user on the volume holding
+            <paramref name="path"/>. Uses lpFreeBytesAvailable, so disk quotas are honoured.
+            </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.IO.NativeFile.GetVolumeRoot(System.String)">
+            <summary>Volume root for a path, e.g. "C:\". Empty when it cannot be determined.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.IO.PathValidation">
+             <summary>
+             Receiver-side validation of every relative path that arrives from the other machine.
+             The sender is assumed hostile: this is an elevated process writing into user
+             profiles, so a crafted path like "..\..\..\Windows\System32\evil.dll" must be
+             impossible, not merely unlikely.
+            
+             Nothing here trusts the sender's claim about where a file belongs. The path is
+             validated segment by segment and then re-checked against the destination root after
+             being combined.
+             </summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.IO.PathValidation.MaxRelativeLength">
+            <summary>Longest relative path we will accept, leaving room for the destination root.</summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.IO.PathValidation.ResolveUnderRoot(System.String,System.String,System.String@)">
+            <summary>
+            Combines a validated relative path with the destination root and proves the
+            result is still inside that root. Returns null on rejection.
+            </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.IO.PathValidation.SanitiseSegment(System.String,System.String)">
+            <summary>
+            Makes an arbitrary string safe to use as a single folder name (used for mapping a
+            received user onto a plain folder).
+            </summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.IO.IPathExclusion">
+            <summary>Decides whether a path is excluded before we even look inside it.</summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.IO.IPathExclusion.IsExcluded(System.String,System.String,System.Boolean,System.String@)">
+            <param name="relativePath">Path relative to the selected root, e.g. "Sub\file.txt".</param>
+            <param name="fullPath">Full source path (may be in \\?\ form).</param>
+            <param name="isDirectory">True when the item is a folder rather than a file.</param>
+            <param name="ruleName">Name of the matching rule, for the report.</param>
+        </member>
+        <member name="T:MoveToNewPC.Core.IO.IFileFilter">
+            <summary>Advanced-mode include/size/date filtering, applied to files only.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.IO.WalkOptions.FollowReparsePoints">
+            <summary>
+            Always false in v1. Vista+ profiles contain compatibility junctions
+            ("Documents and Settings", "AppData\Local\Application Data", "My Documents")
+            that point back at their own ancestors; following them is an infinite loop.
+            </summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.IO.WalkOptions.HydrateCloudFiles">
+            <summary>
+            When false, files whose attributes say a read would trigger a cloud download
+            are reported as CloudPlaceholder skips instead of being opened.
+            </summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.IO.WalkOptions.IncludeEncryptedFiles">
+            <summary>When false, EFS-encrypted files are skipped rather than copied unreadable.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.IO.WalkOptions.MaxDepth">
+            <summary>0 means unlimited.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.IO.WalkOptions.ProgressInterval">
+            <summary>How often OnProgress fires, in entries. 0 uses the default.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.IO.IWalkObserver">
+            <summary>
+            Callbacks from a directory walk. Called on the walking thread; implementations must
+            not touch WinForms controls directly.
+            </summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.IO.CountingWalkObserver">
+            <summary>Counts only. Used for the background per-user size calculation.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Manifests.CompletionJournal">
+            <summary>
+            Receiver-side record of what has already landed, so a dropped connection or a reboot
+            resumes instead of restarting. Append-only and flushed after every entry: a journal
+            that is only correct when the process exits cleanly would be useless for the exact
+            case it exists to handle.
+            </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Manifests.CompletionJournal.OpenOrCreate(System.String,System.String)">
+            <summary>
+            Opens the journal for a manifest, replaying any prior run. A journal belonging to
+            a different manifest is discarded rather than half-applied.
+            </summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Manifests.ManifestReader">
+             <summary>
+             Streaming reader. Header records (H/U/R) are consumed up front and exposed through
+             <see cref="P:MoveToNewPC.Core.Manifests.ManifestReader.Manifest"/>; everything after that is pulled one record at a time.
+            
+             A truncated final line (power cut during a scan) is discarded rather than treated as
+             corruption: a partial manifest that stops early is still useful.
+             </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Manifests.ManifestReader.ReadHeaderOnly(System.String)">
+            <summary>Reads just the header and closes the file. Used to preview a package.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Manifests.ManifestText">
+            <summary>
+            Field escaping for the tab-separated manifest and journal formats
+            (see docs/PROTOCOL.md). Only the four characters that would break the format are
+            escaped - file names contain arbitrary Unicode and must survive byte for byte.
+            </summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Manifests.ManifestRoot">
+            <summary>
+            The manifest is the unit of resumability and the contract between the two machines.
+            It is written and read as a streamed line format (see docs/PROTOCOL.md) rather than
+            held entirely in memory: a 200 GB profile is millions of entries.
+            </summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Manifests.ManifestRoot.SourcePath">
+            <summary>Source folder on the old PC (display form, no \\?\ prefix).</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Manifests.ManifestRoot.DestinationRelativeRoot">
+            <summary>Where it lands under the mapped user root, e.g. "Documents".</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Manifests.ManifestUser.DestinationHint">
+            <summary>Suggested local account on the new PC; the receiver may override it.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Manifests.ManifestEntry">
+            <summary>One file. Timestamps are FILETIME ticks.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Manifests.ManifestEntry.Sha256">
+            <summary>Lower-case hex SHA-256. Null until the sender has actually read the file.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Manifests.TransferManifest">
+            <summary>
+            In-memory manifest header: users, roots, totals and skips. File entries are streamed
+            separately by ManifestWriter/ManifestReader and are NOT held here.
+            </summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Manifests.TransferManifest.ManifestId">
+            <summary>Random id; the receiver's resume journal is keyed on it.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Manifests.ManifestWriter">
+            <summary>
+            Streams a manifest to disk as it is produced. Never holds the entry list in memory:
+            the whole point of the format is that a scan of millions of files costs a constant
+            amount of RAM.
+            </summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Model.FsEntry">
+             <summary>
+             One directory entry as reported by FindFirstFileW/FindNextFileW. Deliberately a
+             class with public fields and a cheap constructor: profile scans produce millions
+             of these and FileInfo would cost an extra syscall each.
+            
+             All three timestamps are FILETIME ticks (100ns since 1601 UTC), not DateTime ticks.
+             </summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Model.FsEntry.ReparseTag">
+            <summary>Reparse tag, valid only when <see cref="P:MoveToNewPC.Core.Model.FsEntry.IsReparsePoint"/>.</summary>
+        </member>
+        <member name="P:MoveToNewPC.Core.Model.FsEntry.IsCloudPlaceholder">
+            <summary>
+            True when reading the file would pull it down from a cloud provider. Covers the
+            classic OFFLINE bit and the Windows 10 cloud-filter bits that OneDrive
+            files-on-demand actually uses.
+            </summary>
+        </member>
+        <member name="P:MoveToNewPC.Core.Model.FsEntry.PortableAttributes">
+            <summary>Attributes worth carrying to the new machine. ACLs are deliberately absent.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Model.SkippedItem">
+            <summary>An item that did not make it, plus why. Feeds the report table directly.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Model.KnownFolder">
+            <summary>Per-user known folders. Resolved from the registry, never hardcoded.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Model.SkipReason">
+            <summary>
+            Why an item was not transferred. Every skip in this application carries one of
+            these and ends up in the report - "it silently didn't copy" is the failure mode
+            this enum exists to prevent.
+            </summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Model.SkipReason.Excluded">
+            <summary>Matched the built-in or user exclusion list.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Model.SkipReason.FilteredOut">
+            <summary>Did not match the Advanced-mode include/size/date filters.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Model.SkipReason.ReparsePoint">
+            <summary>A junction or symlink. Never followed; profiles are full of loops.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Model.SkipReason.CloudPlaceholder">
+            <summary>OneDrive/Dropbox files-on-demand placeholder, not locally present.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Model.SkipReason.Encrypted">
+            <summary>EFS-encrypted; unreadable on the destination machine.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Model.SkipReason.Locked">
+            <summary>Sharing or lock violation after retries.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Model.SkipReason.AccessDenied">
+            <summary>Access denied even while elevated.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Model.SkipReason.NotFound">
+            <summary>Vanished between enumeration and copy.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Model.SkipReason.PathTooLong">
+            <summary>Path exceeds even the extended-path limit.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Model.SkipReason.ReservedName">
+            <summary>Name is an MS-DOS device name (CON, LPT1, ...).</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Model.SkipReason.InvalidPath">
+            <summary>Rejected by receiver-side path validation.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Model.SkipReason.DestinationExists">
+            <summary>Destination already had it and the policy is Skip.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Model.SkipReason.InsufficientSpace">
+            <summary>Not enough room on the destination volume.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Model.SkipReason.HashMismatch">
+            <summary>SHA-256 did not match after a retry.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Model.SkipReason.ReadError">
+            <summary>Read failed for a reason other than locking.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Model.SkipReason.WriteError">
+            <summary>Write failed on the destination.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Model.SkipReason.Cancelled">
+            <summary>Operator cancelled before this item was reached.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Model.SkipReason.AlreadyTransferred">
+            <summary>Already transferred in an earlier run (resume).</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Model.SkipReason.UnknownError">
+            <summary>Anything else; Detail carries the Win32 error.</summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Model.SkipReasons.IsFailure(MoveToNewPC.Core.Model.SkipReason)">
+            <summary>True when the item is genuinely a failure rather than a deliberate skip.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Native.NativeMethods">
+            <summary>
+            Raw Win32 surface. Everything the file engine touches goes through the wide (W)
+            entry points so the \\?\ long-path prefix works; System.IO on .NET 4.0 hard-fails
+            past MAX_PATH and cannot be used for profile trees.
+            </summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Native.NativeMethods.FILE_ATTRIBUTE_OFFLINE">
+            <summary>Classic HSM/offline bit; OneDrive and Dropbox placeholders set it.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Native.NativeMethods.FILE_ATTRIBUTE_RECALL_ON_OPEN">
+            <summary>Windows 10 cloud filter: opening the file triggers a download.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Native.NativeMethods.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS">
+            <summary>Windows 10 files-on-demand: reading the data triggers a download.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Native.NativeMethods.FILE_SHARE_ALL">
+            <summary>What we open source files with: the most permissive sharing there is,
+            because a running Outlook or browser holds its own files open.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Native.NativeMethods.FILE_FLAG_BACKUP_SEMANTICS">
+            <summary>Required to open a directory handle at all.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Native.NativeMethods.FILE_FLAG_OPEN_REPARSE_POINT">
+            <summary>Open the link itself, never the target - keeps junctions inert.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Native.NativeMethods.FILE_FLAG_OPEN_NO_RECALL">
+            <summary>Do not hydrate an offline/placeholder file just because we opened it.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Native.NativeMethods.WIN32_FIND_DATA.dwReserved0">
+            <summary>Reparse tag when dwFileAttributes has FILE_ATTRIBUTE_REPARSE_POINT.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Native.SafeFindHandle">
+            <summary>Handle from FindFirstFileW; INVALID_HANDLE_VALUE means failure.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Native.Privileges">
+            <summary>
+            Enables token privileges. Being in the Administrators group is not the same as
+            holding SeBackupPrivilege/SeRestorePrivilege: they are present but DISABLED in an
+            elevated token and must be switched on before RegLoadKey will work.
+            </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Native.Privileges.EnableBackupAndRestore">
+            <summary>Enables the privileges the profile/hive code needs. Best effort.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Profiles.ProfileEnumerator">
+            <summary>
+            Enumerates user profiles from HKLM ProfileList. The registry is the only reliable
+            source: the folder name under C:\Users often does not match the account name (a
+            renamed account keeps its old folder), and some profiles live on another drive.
+            </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Profiles.ProfileEnumerator.IsMachineOrDomainAccountSid(System.String)">
+            <summary>True for S-1-5-21-... (a real machine-local or domain account).</summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Profiles.ProfileEnumerator.LookupAccountName(System.String,System.String@)">
+            <summary>SID string to "DOMAIN\name" pieces. Returns null when unresolvable.</summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Profiles.ProfileEnumerator.GetSidLength(System.IntPtr)">
+            <summary>
+            SID length from its own header: 8 fixed bytes plus 4 per sub-authority.
+            Avoids a P/Invoke to GetLengthSid for one byte of arithmetic.
+            </summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Profiles.RegistryHiveScope">
+             <summary>
+             Loads another user's NTUSER.DAT into HKEY_USERS so their User Shell Folders can be
+             read, and guarantees it is unloaded again.
+            
+             Leaving a hive loaded is not a cosmetic bug: it keeps the profile locked, can stop
+             the user logging in, and survives our process exiting. Every load in this class is
+             paired with an unload in a finally block, and every RegistryKey we hand out is
+             tracked so it can be closed before the unload (RegUnLoadKey fails while any key in
+             the hive is still open).
+             </summary>
+        </member>
+        <member name="P:MoveToNewPC.Core.Profiles.RegistryHiveScope.MountName">
+            <summary>Sub-key under HKEY_USERS where the hive is mounted.</summary>
+        </member>
+        <member name="P:MoveToNewPC.Core.Profiles.RegistryHiveScope.IsTemporary">
+            <summary>True when we mounted it and therefore must unmount it.</summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Profiles.RegistryHiveScope.Open(System.String,System.String,System.String@)">
+            <summary>
+            Returns a scope for the given profile. If the user is logged on their hive is
+            already under HKU\&lt;sid&gt; and nothing is mounted or unmounted.
+            Returns null (with a reason) when the hive cannot be made available.
+            </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Profiles.RegistryHiveScope.OpenSubKey(System.String)">
+            <summary>Opens a sub-key under the mounted user hive. Returns null when absent.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Profiles.UserProfile">
+            <summary>One row of HKLM\...\ProfileList that survived filtering.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Profiles.UserProfile.AccountName">
+            <summary>Account name from LookupAccountSid, or the folder name if unresolvable.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Profiles.UserProfile.ProfilePath">
+            <summary>ProfileImagePath, environment-expanded. Often does NOT match AccountName.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Profiles.UserProfile.IsHiveLoaded">
+            <summary>True when HKU\&lt;sid&gt; is already present (user is logged on).</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Profiles.UserProfile.IsCurrentUser">
+            <summary>The operator's own account. Its files are the most likely to be locked.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Profiles.UserProfile.KnownFolders">
+            <summary>Resolved User Shell Folders. Missing entries mean "not redirected, not present".</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Profiles.FilteredProfile">
+            <summary>A ProfileList entry we deliberately did not show, and why.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Profiles.UserShellFolders">
+            <summary>
+            Resolves a user's known folders from their own registry hive, so a Documents folder
+            redirected to D:\ is actually found instead of guessed at.
+            </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Profiles.UserShellFolders.Resolve(MoveToNewPC.Core.Profiles.UserProfile)">
+            <summary>
+            Fills <see cref="F:MoveToNewPC.Core.Profiles.UserProfile.KnownFolders"/>. Only folders that actually exist on
+            disk are recorded; the rest are logged so the operator can see what happened.
+            </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Profiles.UserShellFolders.ExpandForProfile(System.String,MoveToNewPC.Core.Profiles.UserProfile)">
+            <summary>
+            Expands the handful of environment variables that appear in User Shell Folders,
+            using the TARGET user's profile rather than the current process environment.
+            </summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Reporting.TransferReport">
+            <summary>
+            Everything the final screen and the saved report file need. Built from a
+            <see cref="T:MoveToNewPC.Core.Transfer.TransferResult"/> plus context the engine does not know about.
+            </summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Reporting.TransferReport.Mode">
+            <summary>"Dry run", "Local copy", "LAN transfer (sender)", ...</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Reporting.ReportWriter">
+            <summary>
+            Writes the report the operator keeps and (eventually) sends to whoever is
+            supporting them. Every skipped and failed item appears with its reason - a report
+            that says "done!" while quietly having dropped 400 files is the failure mode this
+            whole application is built to avoid.
+            </summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Reporting.ReportWriter.MaxRows">
+            <summary>Rows written to the detail table before it is truncated with a pointer to the log.</summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Reporting.ReportWriter.Save(MoveToNewPC.Core.Reporting.TransferReport,System.String)">
+            <summary>Writes both formats next to each other. Returns the .txt path.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Selection.AppDataItem">
+             <summary>
+             Tier B: a curated allow-list of application data, never all of AppData. Every entry
+             is detected on the source machine first; entries that are not there are not shown.
+            
+             Honesty requirement from the spec: application-data restores are best effort and
+             version-sensitive. Each entry carries a Note saying what the catch is, and the UI
+             shows it.
+             </summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Selection.AppDataItem.RelativePath">
+            <summary>Path relative to the profile root, e.g. @"AppData\Local\Google\Chrome\User Data".</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Selection.AppDataItem.DestinationRelativeRoot">
+            <summary>Landing place under the mapped user root on the new PC.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Selection.AppDataItem.UnderDocuments">
+            <summary>When set, the entry hangs off a known folder instead of the profile root.</summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Selection.AppDataCatalog.DetectFor(MoveToNewPC.Core.Profiles.UserProfile)">
+            <summary>
+            Returns only the entries that actually exist for this profile, with their source
+            path filled in. Entries that are absent are not shown at all - offering to move
+            Thunderbird on a machine without Thunderbird is noise.
+            </summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Selection.ExclusionKind.Name">
+            <summary>The item's own name, exactly (case-insensitive).</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Selection.ExclusionKind.NamePattern">
+            <summary>The item's own name, glob.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Selection.ExclusionKind.Segment">
+            <summary>Any path segment equals this (case-insensitive).</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Selection.ExclusionKind.RelativePrefix">
+            <summary>The path relative to the selected root starts with this.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Selection.ExclusionKind.AbsolutePrefix">
+            <summary>The absolute source path starts with this. Used for %WINDIR% etc.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Selection.ExclusionRule.Description">
+            <summary>Shown in the report as the reason.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Selection.ExclusionRule.IsBuiltIn">
+            <summary>Built-in rules can be disabled but not deleted, so the list stays honest.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Selection.ExclusionRules">
+            <summary>
+            The "never move this" list from the spec, as data rather than scattered ifs, so the
+            whole thing can be shown and edited in Advanced mode.
+            </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Selection.ExclusionRules.StartsWithPathPrefix(System.String,System.String)">
+            <summary>
+            Prefix match on whole segments, so "Temp" never matches "Templates".
+            </summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Selection.FileFilter">
+            <summary>
+            Advanced-mode include/exclude globs, extension list, size range and modified-date
+            range. Applied to files only - a directory is never filtered out by size or date.
+            </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Selection.FileFilter.CreateOrNull(MoveToNewPC.Core.Selection.FilterSettings)">
+            <summary>Returns null when the settings would accept everything, so the walker can skip the call entirely.</summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Selection.FileFilter.MatchesPattern(System.String,System.String,System.String)">
+            <summary>
+            A pattern containing a backslash is matched against the path relative to the
+            selected root; otherwise against the file name alone. That is what people
+            expect from "*.jpg" versus "Photos\*.jpg".
+            </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Selection.FileFilter.ParsePatternList(System.String)">
+            <summary>Parses "*.jpg; *.png , *.gif" into a list of patterns.</summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Selection.FileFilter.ParseExtensionList(System.String)">
+            <summary>Parses "jpg;.png" into ".jpg", ".png".</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Selection.KnownFolderInfo">
+            <summary>
+            Maps each Tier A folder to the registry values that locate it and the conventional
+            folder name to fall back on. The registry is the source of truth: a user whose
+            Documents were redirected to D:\ must have D:\ found, not %USERPROFILE%\Documents.
+            </summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Selection.KnownFolderInfo.Label">
+            <summary>What the operator sees.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Selection.KnownFolderInfo.RegistryValueNames">
+            <summary>
+            User Shell Folders value names, most specific first. Vista+ stores the newer
+            folders under their KNOWNFOLDERID GUID rather than a friendly name.
+            </summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Selection.KnownFolderInfo.FallbackFolderNames">
+            <summary>Folder name under the profile if the registry says nothing.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Selection.KnownFolderInfo.DestinationName">
+            <summary>Canonical destination name on the new PC.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Selection.SelectionBuilder">
+            <summary>
+            Turns a discovered profile into the tree of things the operator can tick.
+            Tier A on, Tier B off, Tier C empty until they add something.
+            </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Selection.SelectionBuilder.AddCustomFolder(MoveToNewPC.Core.Selection.UserSelection,System.String)">
+            <summary>Adds a Tier C folder the operator browsed to or dragged in.</summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Selection.SelectionBuilder.MakeSafeDestinationName(System.String)">
+            <summary>
+            A custom folder lands under "Moved from &lt;drive&gt;\&lt;name&gt;" so a folder
+            dragged from D:\Work never collides with the user's own Documents\Work.
+            </summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Selection.SelectionTier.KnownFolder">
+            <summary>Tier A: Desktop, Documents, ... On by default.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Selection.SelectionTier.AppData">
+            <summary>Tier B: curated application data. Off by default, one checkbox away.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Selection.SelectionTier.Custom">
+            <summary>Tier C: anything the operator adds by hand. Advanced mode only.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Selection.SelectionRoot">
+            <summary>One source folder chosen for transfer, and where it lands on the new PC.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Selection.SelectionRoot.Folder">
+            <summary>Set only for Tier A.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Selection.SelectionRoot.DestinationRelativeRoot">
+            <summary>Destination path relative to the mapped user root, e.g. "Documents".</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Selection.SelectionRoot.Note">
+            <summary>Shown next to the entry: "re-creatable", "version sensitive", etc.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Selection.FilterSettings">
+            <summary>Advanced-mode filters. All optional; null/0 means "no constraint".</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Selection.FilterSettings.IncludeExtensions">
+            <summary>Extensions with the dot, e.g. ".jpg". Empty means all.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Selection.TransferSelection">
+            <summary>Everything the operator picked, plus how to treat it.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Selection.TransferSelection.Exclusions">
+            <summary>Populated by ExclusionRules.CreateDefault(); editable in Advanced mode.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Selection.SelectionSizeCalculator">
+             <summary>
+             Walks the selected folders on a background thread to produce live size estimates.
+             The list must never block on this: a 200 GB profile takes minutes to count, and the
+             operator has to be able to tick boxes the whole time.
+            
+             Single worker thread by design. Fanning out across folders would just queue more
+             seeks on the same spindle and make the whole thing slower on the kind of machine
+             people are migrating away from.
+             </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Selection.SelectionSizeCalculator.Start(System.Collections.Generic.IList{MoveToNewPC.Core.Selection.UserSelection},System.Action)">
+            <summary>
+            <paramref name="onChanged"/> is raised on the worker thread, at most a few times
+            a second. UI callers must marshal it themselves.
+            </summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Transfer.TransferVerificationException">
+            <summary>Thrown when what landed on disk does not match what was sent.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Transfer.LocalFolderSink">
+             <summary>
+             Writes into a folder on this machine. Used directly for local/offline copies, and
+             used unchanged by the receiver once the network transport exists - the engine above
+             it never learns the difference.
+            
+             Every incoming relative path is re-validated here, not trusted from the manifest.
+             </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Transfer.LocalFolderSink.MakeUniquePath(System.String)">
+            <summary>Produces "name (1).ext", "name (2).ext", ... for the KeepBoth policy.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Transfer.ScanEngine">
+             <summary>
+             Pass one: walk everything the operator selected and write a manifest.
+            
+             Scanning separately from copying costs a second enumeration, and buys three things
+             the spec requires: a free-space check against a real total before a byte moves, an
+             ETA based on bytes rather than file count, and a dry run that produces the complete
+             report without transferring anything.
+             </summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Transfer.ScanEngine.ScanObserver">
+            <summary>Turns walker callbacks into manifest records.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Transfer.ScanEngine.ScanObserver.MaxInMemorySkips">
+            <summary>
+            Scan-time skips are also kept in memory for the report, but capped: a machine
+            with a million unreadable files must not make us run out of memory building a
+            list nobody can read. The manifest on disk keeps every one of them.
+            </summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Transfer.CollisionPolicy.Skip">
+            <summary>Default. Never silently overwrite anything on the new PC.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Transfer.CollisionPolicy.KeepBoth">
+            <summary>Write "name (1).ext" beside the existing file.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Transfer.CopyOptions.HydrateCloudFiles">
+            <summary>Opt-in. Reading a placeholder otherwise drags gigabytes off the network.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Transfer.CopyOptions.DryRun">
+            <summary>Produce the whole report without writing a byte.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Transfer.CopyOptions.FreeSpaceMarginBytes">
+            <summary>Refuse to start when the destination volume is short of this much slack.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Transfer.SinkFileDecision">
+            <summary>What the sink wants done with a file the engine is about to send.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Transfer.SinkFileDecision.Skip">
+            <summary>Collision policy says leave the destination alone.</summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Transfer.SinkFileDecision.AlreadyComplete">
+            <summary>Resume: the receiver already has this file, verified.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Transfer.ITransferSink">
+            <summary>
+            Where copied bytes go. The file engine never knows whether this is a folder on a
+            USB disk, an encrypted socket, or a dry-run counter - that is the entire point.
+            Implementations are used from ONE thread at a time.
+            </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Transfer.ITransferSink.EnsureDirectory(MoveToNewPC.Core.Manifests.ManifestUser,MoveToNewPC.Core.Manifests.ManifestRoot,MoveToNewPC.Core.Manifests.ManifestDirectory)">
+            <summary>Creates the destination directory and stamps its metadata.</summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Transfer.ITransferSink.EndFile(System.Byte[])">
+            <summary>Finishes the current file. <paramref name="sha256"/> may be null when verification is off.</summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Transfer.ITransferSink.AbortFile(MoveToNewPC.Core.Model.SkipReason,System.String)">
+            <summary>Abandons the current file, removing any partial output.</summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Transfer.ITransferSink.GetAvailableBytes">
+            <summary>Free bytes on the destination, or -1 when unknown (e.g. network sink).</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Transfer.ITransferObserver">
+            <summary>
+            Progress callbacks. Raised on the worker thread; UI implementations must marshal
+            with Control.BeginInvoke (no async/await on this target).
+            </summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Transfer.NullSink">
+            <summary>Discards everything. The dry-run sink.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Transfer.TransferEngine">
+             <summary>
+             Pass two: read the manifest and move the bytes. Knows nothing about where they are
+             going - that is entirely the sink's business.
+            
+             The contract this class exists to honour: one bad file never stops the run. Every
+             per-file failure becomes a skip with a reason and the loop continues.
+             </summary>
+        </member>
+        <member name="F:MoveToNewPC.Core.Transfer.TransferEngine.MaxInMemorySkips">
+            <summary>Cap on the skip list held in memory; the log keeps everything.</summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Transfer.TransferEngine.TryCopyOnce(MoveToNewPC.Core.Manifests.ManifestUser,MoveToNewPC.Core.Manifests.ManifestRoot,MoveToNewPC.Core.Manifests.ManifestEntry,System.String,System.String,System.Byte[],MoveToNewPC.Core.Transfer.TransferResult,System.Threading.CancellationToken,MoveToNewPC.Core.Util.PauseGate,MoveToNewPC.Core.Model.SkipReason@,System.String@,System.Boolean@)">
+            <summary>Returns true when the file is done (copied or deliberately skipped).</summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Util.Format.ConstantTimeEquals(System.Byte[],System.Byte[])">
+            <summary>
+            Length-independent byte comparison. Used for MACs and the pairing code so a
+            timing side channel cannot leak them.
+            </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Util.Format.EllipsisPath(System.String,System.Int32)">
+            <summary>Shortens a path for display without losing the file name.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Util.Glob">
+            <summary>
+            Case-insensitive `*` / `?` matching. Hand-rolled two-pointer matcher rather than
+            Regex: this runs once per file on trees with millions of entries, and building a
+            Regex per rule per file would dominate the scan.
+            </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Util.Glob.IsLiteral(System.String)">
+            <summary>True when the pattern is a plain string with no wildcard characters.</summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Util.HashFactory">
+             <summary>
+             Creates SHA-256 implementations that actually work across the whole OS range.
+            
+             SHA256Managed is the obvious choice and the wrong one: it throws on any machine
+             where the "FIPS compliant algorithms only" policy is set, which is common on
+             corporate builds. CNG (Vista+) and the CryptoServiceProvider are both FIPS-validated,
+             so try those first and keep the managed one as a last resort.
+             </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Util.HashFactory.Update(System.Security.Cryptography.HashAlgorithm,System.Byte[],System.Int32,System.Int32)">
+            <summary>
+            Feeds a block into a running hash. TransformBlock rather than ComputeHash because
+            files here are streamed in chunks and may be larger than memory.
+            </summary>
+        </member>
+        <member name="T:MoveToNewPC.Core.Util.PauseGate">
+            <summary>
+            Pause/resume for a worker thread. No async/await available on this target, so the
+            worker simply blocks on a ManualResetEventSlim between chunks.
+            </summary>
+        </member>
+        <member name="M:MoveToNewPC.Core.Util.PauseGate.Wait(System.Threading.CancellationToken)">
+            <summary>Blocks while paused. Returns false if cancellation happened while waiting.</summary>
+        </member>
+    </members>
+</doc>
