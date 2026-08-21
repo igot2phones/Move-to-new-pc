@@ -88,7 +88,7 @@ Both paths produce, in `build/`:
 | File | What it is |
 |---|---|
 | `MoveToNewPC.exe` | The product. One file. Copy it to a USB stick and run it. |
-| `MoveToNewPC.Tests.exe` | Self-hosted test harness (55 tests). Run it on Windows. |
+| `MoveToNewPC.Tests.exe` |Not shipped.Self-hosted test harness (55 tests). Run it on Windows. |
 | `MakeTestTree.exe` | Generates a deliberately nasty folder tree to test against. |
 | `MoveToNewPC.Core.dll` | Not shipped. Built **without** a WinForms reference purely to prove Core stays headless. |
 
